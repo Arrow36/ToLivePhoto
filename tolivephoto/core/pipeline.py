@@ -1,4 +1,4 @@
-"""End-to-end video-to-iPhone Live Photo conversion pipeline with out-of-bounds pad & NVENC."""
+"""End-to-end video-to-iPhone Live Photo conversion pipeline with Polaroid padding, bitrate control & EXIF."""
 from __future__ import annotations
 
 import shutil
@@ -19,6 +19,7 @@ from .interpolator import ConversionCancelled, interpolate_frames_rife
 from .models import (
     ConversionJob,
     CropRect,
+    FramePadding,
     TimelineSummary,
     VideoInfo,
     compute_timeline_summary,
@@ -45,11 +46,11 @@ class ConversionResult:
 def _parse_hex_rgb(hex_color: str) -> tuple[int, int, int]:
     s = hex_color.strip().lstrip("#")
     if len(s) != 6:
-        return (0, 0, 0)
+        return (255, 255, 255)
     try:
         return int(s[0:2], 16), int(s[2:4], 16), int(s[4:6], 16)
     except ValueError:
-        return (0, 0, 0)
+        return (255, 255, 255)
 
 
 def compute_scaled_video_dims(w: int, h: int, max_long_edge: int) -> tuple[int, int]:
@@ -61,46 +62,56 @@ def compute_scaled_video_dims(w: int, h: int, max_long_edge: int) -> tuple[int, 
     return nw, nh
 
 
+def _make_blurred_background(rgb: np.ndarray, target_w: int, target_h: int, bg_blur_sigma: int) -> np.ndarray:
+    vh, vw = rgb.shape[:2]
+    scale = max(target_w / float(vw), target_h / float(vh))
+    sw = max(target_w, int(round(vw * scale)))
+    sh = max(target_h, int(round(vh * scale)))
+    resized = cv2.resize(rgb, (sw, sh), interpolation=cv2.INTER_LINEAR)
+    x0 = max(0, (sw - target_w) // 2)
+    y0 = max(0, (sh - target_h) // 2)
+    bg_crop = resized[y0 : y0 + target_h, x0 : x0 + target_w]
+    dw = max(2, target_w // 4)
+    dh = max(2, target_h // 4)
+    small = cv2.resize(bg_crop, (dw, dh), interpolation=cv2.INTER_AREA)
+    sigma = max(1.5, float(bg_blur_sigma) / 4.0)
+    blurred = cv2.GaussianBlur(small, (0, 0), sigmaX=sigma, sigmaY=sigma)
+    return cv2.resize(blurred, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
+
+
 def compose_cropped_frame_rgb(
     rgb: np.ndarray,
     crop: CropRect,
     bg_mode: str = "blur",
-    bg_color: str = "#FEFDF9",
+    bg_color: str = "#FFFFFF",
     bg_blur_sigma: int = 35,
+    padding: FramePadding | None = None,
 ) -> np.ndarray:
-    """Render cropped or out-of-bounds padded RGB frame with Gaussian blur or solid background."""
+    """Render cropped, out-of-bounds padded, or Polaroid-framed RGB frame."""
     vh, vw = rgb.shape[:2]
     c = crop.normalized(vw, vh, allow_out_of_bounds=True)
+    pad = (padding or FramePadding()).normalized()
 
-    if not c.is_out_of_bounds(vw, vh):
+    if not c.is_out_of_bounds(vw, vh) and pad.is_zero():
         return rgb[c.y : c.y + c.h, c.x : c.x + c.w].copy()
+
+    total_w = c.w + pad.left + pad.right
+    total_h = c.h + pad.top + pad.bottom
 
     if bg_mode == "solid":
         r, g, b = _parse_hex_rgb(bg_color)
-        canvas = np.empty((c.h, c.w, 3), dtype=np.uint8)
+        canvas = np.empty((total_h, total_w, 3), dtype=np.uint8)
         canvas[:, :] = (r, g, b)
     else:
-        scale = max(c.w / float(vw), c.h / float(vh))
-        sw = max(2, int(round(vw * scale)))
-        sh = max(2, int(round(vh * scale)))
-        resized = cv2.resize(rgb, (sw, sh), interpolation=cv2.INTER_LINEAR)
-        x0 = max(0, (sw - c.w) // 2)
-        y0 = max(0, (sh - c.h) // 2)
-        bg_crop = resized[y0 : y0 + c.h, x0 : x0 + c.w]
-        dw = max(2, c.w // 4)
-        dh = max(2, c.h // 4)
-        small = cv2.resize(bg_crop, (dw, dh), interpolation=cv2.INTER_AREA)
-        sigma = max(1.5, float(bg_blur_sigma) / 4.0)
-        blurred = cv2.GaussianBlur(small, (0, 0), sigmaX=sigma, sigmaY=sigma)
-        canvas = cv2.resize(blurred, (c.w, c.h), interpolation=cv2.INTER_LINEAR)
+        canvas = _make_blurred_background(rgb, total_w, total_h, bg_blur_sigma)
 
     ix1 = max(0, c.x)
     iy1 = max(0, c.y)
     ix2 = min(vw, c.x + c.w)
     iy2 = min(vh, c.y + c.h)
     if ix2 > ix1 and iy2 > iy1:
-        dx = ix1 - c.x
-        dy = iy1 - c.y
+        dx = pad.left + (ix1 - c.x)
+        dy = pad.top + (iy1 - c.y)
         canvas[dy : dy + (iy2 - iy1), dx : dx + (ix2 - ix1)] = rgb[iy1:iy2, ix1:ix2]
     return canvas
 
@@ -122,10 +133,13 @@ def _prepare_cover_image(
     job: ConversionJob,
     info: VideoInfo,
     crop: CropRect,
+    padding: FramePadding,
     temp_dir: Path,
 ) -> Path:
     raw_cover = temp_dir / "cover_raw.png"
     ffmpeg = find_ffmpeg()
+    total_w = crop.w + padding.left + padding.right
+    total_h = crop.h + padding.top + padding.bottom
 
     if job.key_source == "video_frame":
         frame_idx = max(job.start_frame, min(job.key_frame_index, job.end_frame))
@@ -153,6 +167,7 @@ def _prepare_cover_image(
             bg_mode=job.bg_mode,
             bg_color=job.bg_color,
             bg_blur_sigma=job.bg_blur_sigma,
+            padding=padding,
         )
         Image.fromarray(composed).save(raw_cover, format="PNG")
         return raw_cover
@@ -162,20 +177,39 @@ def _prepare_cover_image(
 
     with Image.open(job.external_key_image) as img:
         img = ImageOps.exif_transpose(img).convert("RGB")
-        target_ratio = crop.w / crop.h
+        target_ratio = total_w / total_h
         src_ratio = img.width / img.height
         if abs(src_ratio - target_ratio) > 1e-3:
-            if src_ratio > target_ratio:
-                new_w = max(2, int(round(img.height * target_ratio)))
-                left = (img.width - new_w) // 2
-                img = img.crop((left, 0, left + new_w, img.height))
+            if job.external_key_aspect_mode == "pad_fit":
+                if src_ratio > target_ratio:
+                    canvas_w = img.width
+                    canvas_h = max(2, int(round(canvas_w / target_ratio)))
+                else:
+                    canvas_h = img.height
+                    canvas_w = max(2, int(round(canvas_h * target_ratio)))
+                rgb_ext = np.array(img)
+                if job.bg_mode == "solid":
+                    r, g, b = _parse_hex_rgb(job.bg_color)
+                    canvas = np.empty((canvas_h, canvas_w, 3), dtype=np.uint8)
+                    canvas[:, :] = (r, g, b)
+                else:
+                    canvas = _make_blurred_background(rgb_ext, canvas_w, canvas_h, job.bg_blur_sigma)
+                ox = (canvas_w - img.width) // 2
+                oy = (canvas_h - img.height) // 2
+                canvas[oy : oy + img.height, ox : ox + img.width] = rgb_ext
+                img = Image.fromarray(canvas)
             else:
-                new_h = max(2, int(round(img.width / target_ratio)))
-                top = (img.height - new_h) // 2
-                img = img.crop((0, top, img.width, top + new_h))
+                if src_ratio > target_ratio:
+                    new_w = max(2, int(round(img.height * target_ratio)))
+                    left = (img.width - new_w) // 2
+                    img = img.crop((left, 0, left + new_w, img.height))
+                else:
+                    new_h = max(2, int(round(img.width / target_ratio)))
+                    top = (img.height - new_h) // 2
+                    img = img.crop((0, top, img.width, top + new_h))
 
         if job.external_key_match_video_res:
-            img = img.resize((crop.w, crop.h), Image.Resampling.LANCZOS)
+            img = img.resize((total_w, total_h), Image.Resampling.LANCZOS)
         img.save(raw_cover, format="PNG")
     return raw_cover
 
@@ -241,6 +275,7 @@ def _build_spatial_filter_graph(
     vw: int,
     vh: int,
     crop: CropRect,
+    padding: FramePadding,
     bg_mode: str,
     bg_color: str,
     bg_blur_sigma: int,
@@ -248,10 +283,14 @@ def _build_spatial_filter_graph(
     out_h: int,
 ) -> str:
     cw, ch = crop.w, crop.h
-    need_scale = (out_w != cw) or (out_h != ch)
+    pad = padding.normalized()
+    total_w = cw + pad.left + pad.right
+    total_h = ch + pad.top + pad.bottom
+
+    need_scale = (out_w != total_w) or (out_h != total_h)
     scale_suffix = f",scale={out_w}:{out_h}:flags=lanczos" if need_scale else ""
 
-    if not crop.is_out_of_bounds(vw, vh):
+    if not crop.is_out_of_bounds(vw, vh) and pad.is_zero():
         return f"[{input_label}]crop={cw}:{ch}:{crop.x}:{crop.y}{scale_suffix}[{output_label}]"
 
     ix1 = max(0, crop.x)
@@ -260,23 +299,23 @@ def _build_spatial_filter_graph(
     iy2 = min(vh, crop.y + ch)
     iw = max(2, ix2 - ix1)
     ih = max(2, iy2 - iy1)
-    dx = ix1 - crop.x
-    dy = iy1 - crop.y
+    dx = pad.left + (ix1 - crop.x)
+    dy = pad.top + (iy1 - crop.y)
 
     if bg_mode == "solid":
         hex_col = "0x" + bg_color.strip().lstrip("#")
-        bg_chain = f"[bgsrc]scale=2:2,drawbox=0:0:2:2:color={hex_col}:t=fill,scale={cw}:{ch}:flags=neighbor[bg]"
+        bg_chain = f"[bgsrc]scale=2:2,drawbox=0:0:2:2:color={hex_col}:t=fill,scale={total_w}:{total_h}:flags=neighbor[bg]"
     else:
-        scale_cover = max(cw / float(vw), ch / float(vh))
-        sw = max(cw, int(round((vw * scale_cover) / 2.0) * 2))
-        sh = max(ch, int(round((vh * scale_cover) / 2.0) * 2))
-        dw = max(2, (cw // 4) // 2 * 2)
-        dh = max(2, (ch // 4) // 2 * 2)
+        scale_cover = max(total_w / float(vw), total_h / float(vh))
+        sw = max(total_w, int(round((vw * scale_cover) / 2.0) * 2))
+        sh = max(total_h, int(round((vh * scale_cover) / 2.0) * 2))
+        dw = max(2, (total_w // 4) // 2 * 2)
+        dh = max(2, (total_h // 4) // 2 * 2)
         sigma = max(1.5, float(bg_blur_sigma) / 4.0)
         bg_chain = (
-            f"[bgsrc]scale={sw}:{sh}:flags=bilinear,crop={cw}:{ch},"
+            f"[bgsrc]scale={sw}:{sh}:flags=bilinear,crop={total_w}:{total_h},"
             f"scale={dw}:{dh}:flags=area,gblur=sigma={sigma:.2f}:steps=2,"
-            f"scale={cw}:{ch}:flags=bilinear[bg]"
+            f"scale={total_w}:{total_h}:flags=bilinear[bg]"
         )
 
     return (
@@ -287,7 +326,10 @@ def _build_spatial_filter_graph(
     )
 
 
-def _video_codec_args(use_hw_encode: bool) -> list[str]:
+def _video_codec_args(use_hw_encode: bool, bitrate_mbps: float) -> list[str]:
+    kbps = max(500, int(round(float(bitrate_mbps) * 1000)))
+    max_kbps = int(round(kbps * 1.25))
+    buf_kbps = int(round(kbps * 2.0))
     if use_hw_encode and has_nvenc():
         return [
             "-dn",
@@ -299,8 +341,12 @@ def _video_codec_args(use_hw_encode: bool) -> list[str]:
             "p5",
             "-rc",
             "vbr",
-            "-cq",
-            "19",
+            "-b:v",
+            f"{kbps}k",
+            "-maxrate",
+            f"{max_kbps}k",
+            "-bufsize",
+            f"{buf_kbps}k",
             "-pix_fmt",
             "yuv420p",
             "-profile:v",
@@ -322,8 +368,12 @@ def _video_codec_args(use_hw_encode: bool) -> list[str]:
         "false",
         "-c:v",
         "libx264",
-        "-crf",
-        "17",
+        "-b:v",
+        f"{kbps}k",
+        "-maxrate",
+        f"{max_kbps}k",
+        "-bufsize",
+        f"{buf_kbps}k",
         "-preset",
         "medium",
         "-pix_fmt",
@@ -347,6 +397,7 @@ def _render_intermediate_mov(
     job: ConversionJob,
     info: VideoInfo,
     crop: CropRect,
+    padding: FramePadding,
     summary: TimelineSummary,
     audio_path: Path | None,
     temp_dir: Path,
@@ -357,8 +408,10 @@ def _render_intermediate_mov(
     inter_mov = temp_dir / "intermediate.mov"
     start_f = job.start_frame
     end_f_excl = job.end_frame + 1
-    out_w, out_h = compute_scaled_video_dims(crop.w, crop.h, job.video_max_edge)
-    vcodec = _video_codec_args(job.use_hw_encode)
+    total_w = crop.w + padding.left + padding.right
+    total_h = crop.h + padding.top + padding.bottom
+    out_w, out_h = compute_scaled_video_dims(total_w, total_h, job.video_max_edge)
+    vcodec = _video_codec_args(job.use_hw_encode, job.video_bitrate_mbps)
 
     if job.fps_mode == "rife_interpolate":
         in_frames = temp_dir / "rife_in"
@@ -373,6 +426,7 @@ def _render_intermediate_mov(
             info.width,
             info.height,
             crop,
+            padding,
             job.bg_mode,
             job.bg_color,
             job.bg_blur_sigma,
@@ -406,6 +460,7 @@ def _render_intermediate_mov(
             model_name=job.rife_model,
             width=out_w,
             height=out_h,
+            gpu_id=job.rife_gpu_id,
             progress_cb=progress_cb,
             cancel_cb=cancel_cb,
         )
@@ -437,6 +492,7 @@ def _render_intermediate_mov(
         info.width,
         info.height,
         crop,
+        padding,
         job.bg_mode,
         job.bg_color,
         job.bg_blur_sigma,
@@ -487,9 +543,11 @@ def run_conversion(
     """Execute full conversion, Apple Live Photo metadata injection, verification, and export."""
     info = probe_video(job.video_path)
     crop = job.crop.normalized(info.width, info.height, allow_out_of_bounds=True)
+    padding = job.padding.normalized()
     summary = compute_timeline_summary(info, job)
     asset_id = str(uuid.uuid4()).upper()
-    now_dt = datetime.now()
+    custom_exif = job.exif_metadata
+    effective_dt = (custom_exif.parsed_datetime() if custom_exif else None) or datetime.now()
     ext = "HEIC" if job.image_format == "heic" else "JPG"
 
     with tempfile.TemporaryDirectory(prefix="tolivephoto_") as tmp_str:
@@ -500,16 +558,22 @@ def run_conversion(
 
         if progress_cb:
             progress_cb(5, "正在提取并生成主要图片 (封面)...")
-        raw_cover = _prepare_cover_image(job, info, crop, temp_dir)
+        raw_cover = _prepare_cover_image(job, info, crop, padding, temp_dir)
         staged_img = temp_dir / f"live_cover.{ext}"
-        write_live_image(raw_cover, staged_img, asset_id, creation_dt=now_dt)
+        write_live_image(
+            raw_cover,
+            staged_img,
+            asset_id,
+            creation_dt=effective_dt,
+            custom_exif=custom_exif,
+        )
 
         if progress_cb:
             progress_cb(10, "正在处理音轨..." if not job.mute and info.has_audio else "静音模式：跳过音轨...")
         audio_path = _encode_audio_track(job, info, summary, temp_dir)
 
         inter_mov = _render_intermediate_mov(
-            job, info, crop, summary, audio_path, temp_dir, progress_cb, cancel_cb
+            job, info, crop, padding, summary, audio_path, temp_dir, progress_cb, cancel_cb
         )
 
         if cancel_cb and cancel_cb():
@@ -528,7 +592,8 @@ def run_conversion(
             asset_id=asset_id,
             still_time=still_time,
             duration=actual_dur,
-            creation_dt=now_dt,
+            creation_dt=effective_dt,
+            custom_exif=custom_exif,
         )
 
         if progress_cb:
@@ -557,7 +622,7 @@ def run_conversion(
 
         shutil.copy2(staged_img, img_dest)
         shutil.copy2(staged_mov, mov_dest)
-        sync_pair_timestamps(img_dest, mov_dest, now_dt)
+        sync_pair_timestamps(img_dest, mov_dest, effective_dt)
 
         if livp_dest is not None:
             with zipfile.ZipFile(livp_dest, "w", compression=zipfile.ZIP_STORED) as zf:

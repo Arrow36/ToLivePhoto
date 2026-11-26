@@ -99,6 +99,7 @@ def test_rife_2x_oob_blur_3_4_pad(tmp_path: Path) -> None:
         crop=CropRect(-135, 0, 2430, 3240),
         mute=False,
         fps_mode="rife_interpolate",
+        rife_mode="multiplier",
         rife_multiplier=2,
         rife_model="rife-v4.25",
         rife_playback_policy="keep_duration",

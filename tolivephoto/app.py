@@ -12,6 +12,7 @@ from .ui.main_window import MainWindow
 
 def main() -> int:
     app = QApplication(sys.argv)
+    app.setStyle("Fusion")
     app.setApplicationName("ToLivePhoto")
     app.setOrganizationName("Arrow36")
     app.setWindowIcon(create_app_icon())

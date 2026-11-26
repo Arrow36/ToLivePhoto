@@ -1,4 +1,4 @@
-"""Interactive canvas with wheel zoom, left-drag pan, right-click menu, and manual crop toggle."""
+"""Interactive full-resolution canvas with #FEFDF9 porcelain backdrop, Polaroid sheet rendering, wheel zoom & drag pan."""
 from __future__ import annotations
 
 import cv2
@@ -7,7 +7,7 @@ from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QContextMenuEvent, QImage, QMouseEvent, QPainter, QPen, QPixmap, QWheelEvent
 from PySide6.QtWidgets import QWidget
 
-from ..core.models import CropRect
+from ..core.models import CropRect, FramePadding
 
 
 class CropPreviewWidget(QWidget):
@@ -41,13 +41,14 @@ class CropPreviewWidget(QWidget):
         self._video_w: int = 0
         self._video_h: int = 0
         self._crop = CropRect(0, 0, 2, 2)
+        self._padding = FramePadding()
         self._aspect_ratio: float | None = None
         self._bg_mode: str = "blur"
-        self._bg_color: str = "#FEFDF9"
+        self._bg_color: str = "#FFFFFF"
         self._bg_blur_sigma: int = 35
-        self._backdrop_hex: str = "#E6ECF8"
+        self._backdrop_hex: str = "#FEFDF9"
 
-        self._crop_editing: bool = False  # Hidden until user clicks "裁切画面"
+        self._crop_editing: bool = False
         self._zoom: float = 1.0
         self._pan = QPointF(0.0, 0.0)
 
@@ -83,6 +84,14 @@ class CropPreviewWidget(QWidget):
         self._bg_blur_sigma = bg_blur_sigma
         self._blur_cache_key = None
         self.update()
+
+    def set_padding(self, padding: FramePadding) -> None:
+        self._padding = padding.normalized()
+        self._blur_cache_key = None
+        self.update()
+
+    def get_padding(self) -> FramePadding:
+        return self._padding
 
     def set_crop(self, crop: CropRect, emit: bool = False) -> None:
         if self._video_w > 0 and self._video_h > 0:
@@ -153,18 +162,22 @@ class CropPreviewWidget(QWidget):
         self.set_crop(CropRect(x, y, w, h), emit=True)
 
     def _compute_workspace(self) -> tuple[float, float, float]:
-        """Compute (origin_x, origin_y, scale) incorporating zoom & pan."""
+        """Compute (origin_x, origin_y, scale) incorporating zoom, pan, and outer Polaroid padding."""
         if self._drag_workspace is not None:
             return self._drag_workspace
 
+        sx1 = self._crop.x - self._padding.left
+        sy1 = self._crop.y - self._padding.top
+        sx2 = self._crop.x + self._crop.w + self._padding.right
+        sy2 = self._crop.y + self._crop.h + self._padding.bottom
+
         if self._crop_editing:
-            ux1 = min(0, self._crop.x)
-            uy1 = min(0, self._crop.y)
-            ux2 = max(self._video_w, self._crop.x + self._crop.w)
-            uy2 = max(self._video_h, self._crop.y + self._crop.h)
+            ux1 = min(0, sx1)
+            uy1 = min(0, sy1)
+            ux2 = max(self._video_w, sx2)
+            uy2 = max(self._video_h, sy2)
         else:
-            ux1, uy1 = self._crop.x, self._crop.y
-            ux2, uy2 = self._crop.x + self._crop.w, self._crop.y + self._crop.h
+            ux1, uy1, ux2, uy2 = sx1, sy1, sx2, sy2
 
         uw = max(10.0, float(ux2 - ux1))
         uh = max(10.0, float(uy2 - uy1))
@@ -194,10 +207,19 @@ class CropPreviewWidget(QWidget):
             self._crop.h * scale,
         )
 
+    def _sheet_widget_rect(self, ws: tuple[float, float, float]) -> QRectF:
+        ox, oy, scale = ws
+        return QRectF(
+            ox + (self._crop.x - self._padding.left) * scale,
+            oy + (self._crop.y - self._padding.top) * scale,
+            (self._crop.w + self._padding.left + self._padding.right) * scale,
+            (self._crop.h + self._padding.top + self._padding.bottom) * scale,
+        )
+
     def _get_blurred_bg_pixmap(self, target_w: int, target_h: int) -> QPixmap | None:
         if self._qimage is None or target_w < 4 or target_h < 4:
             return None
-        key = (self._frame_seq, target_w, target_h, self._bg_blur_sigma, self._crop.w)
+        key = (self._frame_seq, target_w, target_h, self._bg_blur_sigma, self._crop.w + self._padding.left)
         if self._blur_cache_key == key and self._blur_pixmap is not None:
             return self._blur_pixmap
 
@@ -265,47 +287,56 @@ class CropPreviewWidget(QWidget):
         painter.fillRect(self.rect(), QColor(self._backdrop_hex))
 
         if self._pixmap is None or self._video_w <= 0 or self._video_h <= 0:
-            painter.setPen(QColor("#5C6484"))
+            painter.setPen(QColor("#4F5776"))
             painter.drawText(
                 self.rect(),
                 Qt.AlignmentFlag.AlignCenter,
-                "拖入视频文件，或点击右上角「打开视频...」",
+                "拖入视频文件 (支持多选)，或点击右上角「导入视频」",
             )
             return
 
         ws = self._compute_workspace()
         vrect = self._video_widget_rect(ws)
         crect = self._crop_widget_rect(ws)
-        is_oob = self._crop.is_out_of_bounds(self._video_w, self._video_h)
+        srect = self._sheet_widget_rect(ws)
+        has_pad = not self._padding.is_zero()
+        is_oob = self._crop.is_out_of_bounds(self._video_w, self._video_h) or has_pad
+
+        src_rect = QRectF(self._pixmap.rect())
 
         if not self._crop_editing:
-            # Clean gallery preview: clip strictly to crect
+            # Soft shadow around output card/sheet so white Polaroid paper stands out on #FEFDF9
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(37, 41, 58, 22))
+            painter.drawRoundedRect(srect.translated(2.0, 4.0), 4.0, 4.0)
+
             painter.save()
-            painter.setClipRect(crect)
+            painter.setClipRect(srect)
             if is_oob:
                 if self._bg_mode == "solid":
-                    painter.fillRect(crect, QColor(self._bg_color))
+                    painter.fillRect(srect, QColor(self._bg_color))
                 else:
-                    blur_pix = self._get_blurred_bg_pixmap(max(4, int(crect.width())), max(4, int(crect.height())))
+                    blur_pix = self._get_blurred_bg_pixmap(max(4, int(srect.width())), max(4, int(srect.height())))
                     if blur_pix is not None:
-                        painter.drawPixmap(crect.toRect(), blur_pix)
-            painter.drawPixmap(vrect.toRect(), self._pixmap)
+                        painter.drawPixmap(srect, blur_pix, QRectF(blur_pix.rect()))
+            painter.setClipRect(crect)
+            painter.drawPixmap(vrect, self._pixmap, src_rect)
             painter.restore()
-            # Subtle hairline card border
-            painter.setPen(QPen(QColor("#A4C6E9"), 1))
-            painter.drawRect(crect)
+
+            painter.setPen(QPen(QColor("#C4D3ED"), 1.0))
+            painter.drawRect(srect)
             return
 
         # Interactive crop-editing mode
         if is_oob:
             if self._bg_mode == "solid":
-                painter.fillRect(crect, QColor(self._bg_color))
+                painter.fillRect(srect, QColor(self._bg_color))
             else:
-                blur_pix = self._get_blurred_bg_pixmap(max(4, int(crect.width())), max(4, int(crect.height())))
+                blur_pix = self._get_blurred_bg_pixmap(max(4, int(srect.width())), max(4, int(srect.height())))
                 if blur_pix is not None:
-                    painter.drawPixmap(crect.toRect(), blur_pix)
+                    painter.drawPixmap(srect, blur_pix, QRectF(blur_pix.rect()))
 
-        painter.drawPixmap(vrect.toRect(), self._pixmap)
+        painter.drawPixmap(vrect, self._pixmap, src_rect)
 
         mask_color = QColor(20, 24, 38, 130)
         inter = vrect.intersected(crect)
@@ -320,21 +351,20 @@ class CropPreviewWidget(QWidget):
                 painter.fillRect(QRectF(inter.right(), inter.top(), vrect.right() - inter.right(), inter.height()), mask_color)
 
         if is_oob:
-            painter.setPen(QPen(QColor(254, 253, 249, 170), 1.5, Qt.PenStyle.DashLine))
-            painter.drawRect(vrect)
+            painter.setPen(QPen(QColor("#A4C6E9"), 1.5, Qt.PenStyle.DashLine))
+            painter.drawRect(srect)
 
-        painter.setPen(QPen(QColor(254, 253, 249, 110), 1, Qt.PenStyle.DashLine))
+        painter.setPen(QPen(QColor(254, 253, 249, 120), 1, Qt.PenStyle.DashLine))
         for i in (1, 2):
             gx = crect.left() + crect.width() * i / 3.0
             gy = crect.top() + crect.height() * i / 3.0
             painter.drawLine(QPointF(gx, crect.top()), QPointF(gx, crect.bottom()))
             painter.drawLine(QPointF(crect.left(), gy), QPointF(crect.right(), gy))
 
-        # Periwinkle Indigo (#838BCC) crop border + handles
-        painter.setPen(QPen(QColor("#838BCC"), 2.5))
+        painter.setPen(QPen(QColor("#7D85CC"), 2.5))
         painter.drawRect(crect)
         painter.setBrush(QColor("#FEFDF9"))
-        painter.setPen(QPen(QColor("#838BCC"), 2))
+        painter.setPen(QPen(QColor("#7D85CC"), 2))
         hs = 9.0
         pts = [
             crect.topLeft(),
@@ -349,14 +379,16 @@ class CropPreviewWidget(QWidget):
         for pt in pts:
             painter.drawRoundedRect(QRectF(pt.x() - hs / 2, pt.y() - hs / 2, hs, hs), 2, 2)
 
-        tag = " (外扩)" if is_oob else ""
-        badge_text = f"{self._crop.w} × {self._crop.h}{tag}"
+        total_w = self._crop.w + self._padding.left + self._padding.right
+        total_h = self._crop.h + self._padding.top + self._padding.bottom
+        tag = " (相纸)" if has_pad else (" (外扩)" if is_oob else "")
+        badge_text = f"{total_w} × {total_h}{tag}"
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(131, 139, 204, 215))
-        painter.drawRoundedRect(QRectF(crect.left() + 6, crect.top() + 6, 136, 22), 5, 5)
+        painter.setBrush(QColor(125, 133, 204, 220))
+        painter.drawRoundedRect(QRectF(crect.left() + 6, crect.top() + 6, 152, 22), 5, 5)
         painter.setPen(QColor("#FEFDF9"))
         painter.drawText(
-            QRectF(crect.left() + 10, crect.top() + 6, 130, 22),
+            QRectF(crect.left() + 10, crect.top() + 6, 146, 22),
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
             badge_text,
         )
@@ -398,7 +430,6 @@ class CropPreviewWidget(QWidget):
                 self._drag_workspace = ws
                 return
 
-        # Left-drag anywhere (when crop editing off, or outside crop box) pans the canvas
         self._drag_mode = self.HANDLE_PAN
         self._drag_start_pos = event.position()
         self._drag_start_pan = QPointF(self._pan)

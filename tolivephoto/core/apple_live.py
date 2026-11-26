@@ -6,11 +6,13 @@ import struct
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
+from fractions import Fraction
 from pathlib import Path
 
 from PIL import Image
 from pillow_heif import register_heif_opener
 
+from .exif_io import ExifMetadata
 from .iso_bmff import Atom, atom, child_atoms, first_child, parse_atoms, patch_chunk_offsets
 
 register_heif_opener()
@@ -86,44 +88,138 @@ def _encode_tiff_ifd(entries: list[tuple[int, int, int, bytes]], base_offset: in
     return bytes(ifd_buf), bytes(data_buf)
 
 
+def _ascii_bytes(text: str) -> bytes:
+    return text.encode("utf-8", errors="replace") + b"\x00"
+
+
+def _parse_positive_rational(text: str) -> tuple[int, int] | None:
+    raw = text.strip().lower().rstrip("s").lstrip("f/")
+    if not raw:
+        return None
+    try:
+        frac = Fraction(raw).limit_denominator(1_000_000)
+    except (ValueError, ZeroDivisionError):
+        return None
+    if frac <= 0:
+        return None
+    return int(frac.numerator), int(frac.denominator)
+
+
+def _parse_signed_rational(text: str) -> tuple[int, int] | None:
+    raw = text.strip()
+    if not raw:
+        return None
+    try:
+        frac = Fraction(raw).limit_denominator(10_000)
+    except (ValueError, ZeroDivisionError):
+        return None
+    return int(frac.numerator), int(frac.denominator)
+
+
+def _deg_to_dms_rational_bytes(deg_abs: float) -> bytes:
+    d = int(deg_abs)
+    rem_min = (deg_abs - d) * 60.0
+    m = int(rem_min)
+    s_num = int(round((rem_min - m) * 60.0 * 10000))
+    return struct.pack(">IIIIII", d, 1, m, 1, s_num, 10000)
+
+
 def build_apple_exif_bytes(
     asset_id: str,
     width: int,
     height: int,
     creation_dt: datetime | None = None,
+    custom_exif: ExifMetadata | None = None,
 ) -> bytes:
-    """Build Big-Endian (MM) EXIF payload with IFD0 + Exif SubIFD (0x8769) + Apple MakerNote."""
-    dt = creation_dt or datetime.now()
-    dt_bytes = dt.strftime("%Y:%m:%d %H:%M:%S").encode("ascii") + b"\x00"
-    make_b = DEVICE_MAKE.encode("ascii") + b"\x00"
-    model_b = DEVICE_MODEL.encode("ascii") + b"\x00"
-    sw_b = DEVICE_SOFTWARE.encode("ascii") + b"\x00"
+    """Build Big-Endian (MM) EXIF payload with IFD0 + Exif SubIFD (0x8769) + Apple MakerNote + optional camera/GPS tags."""
+    dt = (custom_exif.parsed_datetime() if custom_exif else None) or creation_dt or datetime.now()
+    dt_str = dt.strftime("%Y:%m:%d %H:%M:%S")
+    dt_bytes = dt_str.encode("ascii") + b"\x00"
+
+    make_str = (custom_exif.make.strip() if custom_exif and custom_exif.make.strip() else DEVICE_MAKE)
+    model_str = (custom_exif.model.strip() if custom_exif and custom_exif.model.strip() else DEVICE_MODEL)
+    sw_str = (custom_exif.software.strip() if custom_exif and custom_exif.software.strip() else DEVICE_SOFTWARE)
+
+    make_b = _ascii_bytes(make_str)
+    model_b = _ascii_bytes(model_str)
+    sw_b = _ascii_bytes(sw_str)
     note_b = apple_maker_note(asset_id)
 
-    ifd0_stub = [
+    has_gps = bool(custom_exif and custom_exif.gps_lat is not None and custom_exif.gps_lon is not None)
+
+    ifd0_base: list[tuple[int, int, int, bytes]] = [
         (0x010F, 2, len(make_b), make_b),
         (0x0110, 2, len(model_b), model_b),
         (0x0112, 3, 1, struct.pack(">H", 1)),
         (0x0131, 2, len(sw_b), sw_b),
         (0x0132, 2, len(dt_bytes), dt_bytes),
-        (0x8769, 4, 1, struct.pack(">I", 0)),
     ]
-    ifd0_bytes_0, data0_bytes = _encode_tiff_ifd(ifd0_stub, base_offset=8)
-    sub_ifd_offset = 8 + len(ifd0_bytes_0) + len(data0_bytes)
+    if custom_exif and custom_exif.artist.strip():
+        art_b = _ascii_bytes(custom_exif.artist.strip())
+        ifd0_base.append((0x013B, 2, len(art_b), art_b))
+    if custom_exif and custom_exif.copyright.strip():
+        cpr_b = _ascii_bytes(custom_exif.copyright.strip())
+        ifd0_base.append((0x8298, 2, len(cpr_b), cpr_b))
 
-    ifd0_real = ifd0_stub[:-1] + [(0x8769, 4, 1, struct.pack(">I", sub_ifd_offset))]
-    ifd0_bytes, data0_bytes = _encode_tiff_ifd(ifd0_real, base_offset=8)
+    ifd0_stub = list(ifd0_base) + [(0x8769, 4, 1, struct.pack(">I", 0))]
+    if has_gps:
+        ifd0_stub.append((0x8825, 4, 1, struct.pack(">I", 0)))
 
-    sub_entries = [
+    ifd0_bytes_0, data0_bytes_0 = _encode_tiff_ifd(ifd0_stub, base_offset=8)
+    sub_ifd_offset = 8 + len(ifd0_bytes_0) + len(data0_bytes_0)
+
+    sub_entries: list[tuple[int, int, int, bytes]] = [
         (0x9003, 2, len(dt_bytes), dt_bytes),
         (0x9004, 2, len(dt_bytes), dt_bytes),
         (0x927C, 7, len(note_b), note_b),
         (0xA002, 4, 1, struct.pack(">I", int(width))),
         (0xA003, 4, 1, struct.pack(">I", int(height))),
     ]
+    if custom_exif:
+        if custom_exif.offset_time.strip():
+            off_b = _ascii_bytes(custom_exif.offset_time.strip())
+            sub_entries.append((0x9010, 2, len(off_b), off_b))
+            sub_entries.append((0x9011, 2, len(off_b), off_b))
+        exp = _parse_positive_rational(custom_exif.exposure_time)
+        if exp:
+            sub_entries.append((0x829A, 5, 1, struct.pack(">II", *exp)))
+        fnum = _parse_positive_rational(custom_exif.f_number)
+        if fnum:
+            sub_entries.append((0x829D, 5, 1, struct.pack(">II", *fnum)))
+        if custom_exif.iso is not None and custom_exif.iso > 0:
+            sub_entries.append((0x8827, 3, 1, struct.pack(">H", min(65535, int(custom_exif.iso)))))
+        ev = _parse_signed_rational(custom_exif.exposure_bias)
+        if ev is not None and custom_exif.exposure_bias.strip():
+            sub_entries.append((0x9204, 10, 1, struct.pack(">ii", *ev)))
+        fl = _parse_positive_rational(custom_exif.focal_length)
+        if fl:
+            sub_entries.append((0x920A, 5, 1, struct.pack(">II", *fl)))
+        if custom_exif.focal_length_35mm is not None and custom_exif.focal_length_35mm > 0:
+            sub_entries.append((0xA405, 3, 1, struct.pack(">H", min(65535, int(custom_exif.focal_length_35mm)))))
+        if custom_exif.lens_model.strip():
+            lens_b = _ascii_bytes(custom_exif.lens_model.strip())
+            sub_entries.append((0xA434, 2, len(lens_b), lens_b))
+
     sub_bytes, sub_data = _encode_tiff_ifd(sub_entries, base_offset=sub_ifd_offset)
 
-    tiff = b"MM\x00*" + struct.pack(">I", 8) + ifd0_bytes + data0_bytes + sub_bytes + sub_data
+    gps_bytes = b""
+    gps_data = b""
+    ifd0_real = list(ifd0_base) + [(0x8769, 4, 1, struct.pack(">I", sub_ifd_offset))]
+    if has_gps and custom_exif is not None and custom_exif.gps_lat is not None and custom_exif.gps_lon is not None:
+        gps_offset = sub_ifd_offset + len(sub_bytes) + len(sub_data)
+        ifd0_real.append((0x8825, 4, 1, struct.pack(">I", gps_offset)))
+        lat_ref = b"N\x00" if custom_exif.gps_lat >= 0 else b"S\x00"
+        lon_ref = b"E\x00" if custom_exif.gps_lon >= 0 else b"W\x00"
+        gps_entries = [
+            (0x0001, 2, 2, lat_ref),
+            (0x0002, 5, 3, _deg_to_dms_rational_bytes(abs(custom_exif.gps_lat))),
+            (0x0003, 2, 2, lon_ref),
+            (0x0004, 5, 3, _deg_to_dms_rational_bytes(abs(custom_exif.gps_lon))),
+        ]
+        gps_bytes, gps_data = _encode_tiff_ifd(gps_entries, base_offset=gps_offset)
+
+    ifd0_bytes, data0_bytes = _encode_tiff_ifd(ifd0_real, base_offset=8)
+    tiff = b"MM\x00*" + struct.pack(">I", 8) + ifd0_bytes + data0_bytes + sub_bytes + sub_data + gps_bytes + gps_data
     return b"Exif\x00\x00" + tiff
 
 
@@ -132,6 +228,7 @@ def write_live_image(
     output: Path,
     asset_id: str,
     creation_dt: datetime | None = None,
+    custom_exif: ExifMetadata | None = None,
 ) -> None:
     """Write HEIC or JPEG cover image with Big-Endian Apple EXIF + MakerNote ContentIdentifier."""
     should_close = False
@@ -144,7 +241,13 @@ def write_live_image(
     try:
         icc_profile = original.info.get("icc_profile") if hasattr(original, "info") else None
         image = original.convert("RGB")
-        exif_bytes = build_apple_exif_bytes(asset_id, image.width, image.height, creation_dt)
+        exif_bytes = build_apple_exif_bytes(
+            asset_id,
+            image.width,
+            image.height,
+            creation_dt=creation_dt,
+            custom_exif=custom_exif,
+        )
 
         ext = output.suffix.lower()
         if ext in (".heic", ".heif"):
@@ -252,22 +355,41 @@ def _pascal(text: bytes) -> bytes:
     return bytes((len(text),)) + text
 
 
-def _quicktime_meta_atom(asset_id: str, still_time: float, creation_dt: datetime) -> bytes:
+def _quicktime_meta_atom(
+    asset_id: str,
+    still_time: float,
+    creation_dt: datetime,
+    custom_exif: ExifMetadata | None = None,
+) -> bytes:
     identifier = canonical_asset_id(asset_id)
-    local_dt = creation_dt.astimezone()
-    creation_iso = local_dt.strftime("%Y-%m-%dT%H:%M:%S%z")
+    dt_to_use = (custom_exif.parsed_datetime() if custom_exif else None) or creation_dt
+    if custom_exif and custom_exif.offset_time.strip():
+        off = custom_exif.offset_time.strip().replace(":", "")
+        if len(off) == 5 and off[0] in ("+", "-"):
+            creation_iso = f"{dt_to_use.strftime('%Y-%m-%dT%H:%M:%S')}{off}"
+        else:
+            creation_iso = dt_to_use.astimezone().strftime("%Y-%m-%dT%H:%M:%S%z")
+    else:
+        creation_iso = dt_to_use.astimezone().strftime("%Y-%m-%dT%H:%M:%S%z")
+
+    make_str = custom_exif.make.strip() if custom_exif and custom_exif.make.strip() else DEVICE_MAKE
+    model_str = custom_exif.model.strip() if custom_exif and custom_exif.model.strip() else DEVICE_MODEL
+    sw_str = custom_exif.software.strip() if custom_exif and custom_exif.software.strip() else DEVICE_SOFTWARE
 
     entries: list[tuple[bytes, int, bytes]] = [
         (b"com.apple.quicktime.live-photo.auto", 22, b"\x01"),
         (b"com.apple.quicktime.live-photo.vitality-score", 23, struct.pack(">f", 0.95)),
         (b"com.apple.quicktime.live-photo.vitality-scoring-version", 21, struct.pack(">q", 4)),
-        (b"com.apple.quicktime.make", 1, DEVICE_MAKE.encode("utf-8")),
-        (b"com.apple.quicktime.model", 1, DEVICE_MODEL.encode("utf-8")),
-        (b"com.apple.quicktime.software", 1, DEVICE_SOFTWARE.encode("utf-8")),
+        (b"com.apple.quicktime.make", 1, make_str.encode("utf-8")),
+        (b"com.apple.quicktime.model", 1, model_str.encode("utf-8")),
+        (b"com.apple.quicktime.software", 1, sw_str.encode("utf-8")),
         (b"com.apple.quicktime.creationdate", 1, creation_iso.encode("utf-8")),
         (CONTENT_KEY, 1, identifier.encode("ascii")),
         (STILL_TIME_KEY, 23, struct.pack(">f", float(max(0.0, still_time)))),
     ]
+    if custom_exif and custom_exif.gps_lat is not None and custom_exif.gps_lon is not None:
+        iso6709 = f"{custom_exif.gps_lat:+08.4f}{custom_exif.gps_lon:+09.4f}/".encode("ascii")
+        entries.append((b"com.apple.quicktime.location.ISO6709", 1, iso6709))
 
     hdlr = atom(b"hdlr", _fullbox() + b"\x00" * 4 + b"mdta" + b"\x00" * 12 + b"\x00\x00")
     key_chunks = [struct.pack(">I4s", 8 + len(k), b"mdta") + k for k, _, _ in entries]
@@ -421,6 +543,7 @@ def write_live_mov(
     still_time: float,
     duration: float,
     creation_dt: datetime | None = None,
+    custom_exif: ExifMetadata | None = None,
 ) -> None:
     """Write authentic Apple Live Photo MOV (ftyp -> moov -> mdat) with full metadata & mebx track."""
     identifier = canonical_asset_id(asset_id)
@@ -455,7 +578,7 @@ def write_live_mov(
         for child in child_atoms(raw_moov, parsed_raw_moov)
         if child.type != b"meta"
     )
-    meta_bytes = _quicktime_meta_atom(identifier, still_time, dt)
+    meta_bytes = _quicktime_meta_atom(identifier, still_time, dt, custom_exif=custom_exif)
 
     est_sample_offset = len(ftyp_bytes) + len(raw_moov) + len(meta_bytes) + 1024 + mdat_hdr_len + len(old_media)
     use_co64 = est_sample_offset > 0xFFFFFFFF

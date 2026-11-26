@@ -1,4 +1,4 @@
-"""RIFE (rife-ncnn-vulkan) optical flow frame interpolation wrapper with cancellation."""
+"""RIFE (rife-ncnn-vulkan) optical flow frame interpolation wrapper with GPU acceleration & cancellation."""
 from __future__ import annotations
 
 import subprocess
@@ -23,10 +23,11 @@ def interpolate_frames_rife(
     model_name: str,
     width: int,
     height: int,
+    gpu_id: int = 0,
     progress_cb: ProgressCallback | None = None,
     cancel_cb: CancelCallback | None = None,
 ) -> None:
-    """Run rife-ncnn-vulkan on PNG sequence with live progress polling and cancellation."""
+    """Run rife-ncnn-vulkan on PNG sequence with explicit GPU selection, live progress polling, and cancellation."""
     rife_exe = find_rife()
     if rife_exe is None:
         raise FileNotFoundError("未找到 rife-ncnn-vulkan.exe，请先点击「一键下载 RIFE」或运行 scripts/setup_rife.py。")
@@ -43,6 +44,7 @@ def interpolate_frames_rife(
             raise FileNotFoundError(f"未找到 RIFE 模型目录: {model_name}")
 
     output_dir.mkdir(parents=True, exist_ok=True)
+    threads = "2:4:4" if gpu_id >= 0 else "1:2:2"
     cmd = [
         str(rife_exe),
         "-i",
@@ -53,6 +55,10 @@ def interpolate_frames_rife(
         str(target_frames),
         "-m",
         model_name,
+        "-g",
+        str(gpu_id),
+        "-j",
+        threads,
         "-f",
         "%08d.png",
     ]
@@ -81,7 +87,8 @@ def interpolate_frames_rife(
             if done_count != last_count:
                 last_count = done_count
                 pct = 25 + int(45 * min(1.0, done_count / max(1, target_frames)))
-                progress_cb(pct, f"AI 光流补帧中 ({model_name}): {done_count} / {target_frames} 帧")
+                accel_tag = f"GPU:{gpu_id}" if gpu_id >= 0 else "CPU"
+                progress_cb(pct, f"AI 光流补帧中 ({model_name} · {accel_tag}): {done_count} / {target_frames} 帧")
         time.sleep(0.15)
 
     stdout, stderr = proc.communicate()

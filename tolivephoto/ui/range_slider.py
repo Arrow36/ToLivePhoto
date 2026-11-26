@@ -1,9 +1,11 @@
-"""Dual-handle range timeline slider styled in the ToLivePhoto pastel palette."""
+"""Dual-handle range timeline slider with X秒Y帧 labels (zero decimal points)."""
 from __future__ import annotations
 
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QMouseEvent, QPainter, QPen
 from PySide6.QtWidgets import QWidget
+
+from ..core.models import format_frames_as_sec_frames, format_sec_frames
 
 
 class RangeTimelineSlider(QWidget):
@@ -17,7 +19,7 @@ class RangeTimelineSlider(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setFixedHeight(64)
+        self.setFixedHeight(66)
         self.setMouseTracking(True)
         self._total = 1
         self._start = 0
@@ -27,6 +29,8 @@ class RangeTimelineSlider(QWidget):
         self._show_key_star = True
         self._output_duration = 0.0
         self._cover_still_time = 0.0
+        self._output_fps = 24.0
+        self._output_frames = 0
         self._drag_target = self._NONE
 
     def configure(self, total_frames: int, start: int, end: int, current: int, key_frame: int) -> None:
@@ -37,9 +41,17 @@ class RangeTimelineSlider(QWidget):
         self._key_frame = max(0, min(key_frame, self._total - 1))
         self.update()
 
-    def set_timing_context(self, output_duration: float, cover_still_time: float) -> None:
+    def set_timing_context(
+        self,
+        output_duration: float,
+        cover_still_time: float,
+        output_fps: float = 24.0,
+        output_frames: int = 0,
+    ) -> None:
         self._output_duration = max(0.0, output_duration)
         self._cover_still_time = max(0.0, cover_still_time)
+        self._output_fps = max(1.0, output_fps)
+        self._output_frames = max(0, output_frames)
         self.update()
 
     def set_key_frame(self, key_frame: int, show_star: bool = True) -> None:
@@ -52,7 +64,7 @@ class RangeTimelineSlider(QWidget):
         self.update()
 
     def _track_rect(self) -> QRectF:
-        return QRectF(20, 22, max(20, self.width() - 40), 10)
+        return QRectF(20, 23, max(20, self.width() - 40), 10)
 
     def _frame_to_x(self, frame: int) -> float:
         tr = self._track_rect()
@@ -72,12 +84,12 @@ class RangeTimelineSlider(QWidget):
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         tr = self._track_rect()
         small_font = QFont(self.font())
-        small_font.setPixelSize(11)
+        small_font.setPixelSize(12)
         p.setFont(small_font)
 
         # Background track
         p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QColor("#DCE6F7"))
+        p.setBrush(QColor("#D4E0F4"))
         p.drawRoundedRect(tr, 5, 5)
 
         sx = self._frame_to_x(self._start)
@@ -86,61 +98,73 @@ class RangeTimelineSlider(QWidget):
         p.setBrush(QColor("#A4C6E9"))
         p.drawRoundedRect(QRectF(sx, tr.top(), span_w, tr.height()), 5, 5)
 
-        # Top row annotations
-        p.setPen(QColor("#5C6484"))
-        p.drawText(QRectF(max(0.0, sx - 18), 2, 46, 16), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, "0.00s")
-
-        dur_color = QColor("#6B3475") if self._output_duration > 3.0 else QColor("#838BCC")
-        p.setPen(dur_color)
+        # Top row annotations (X秒Y帧, zero decimals)
+        p.setPen(QColor("#4F5776"))
         p.drawText(
-            QRectF(min(self.width() - 78, ex - 38), 2, 76, 16),
+            QRectF(max(0.0, sx - 12), 2, 64, 17),
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+            "0秒0帧",
+        )
+
+        dur_color = QColor("#642E6E") if self._output_duration > 3.0 else QColor("#7D85CC")
+        p.setPen(dur_color)
+        total_txt = (
+            format_frames_as_sec_frames(self._output_frames, self._output_fps)
+            if self._output_frames > 0
+            else format_sec_frames(self._output_duration, self._output_fps)
+        )
+        p.drawText(
+            QRectF(min(self.width() - 96, ex - 48), 2, 94, 17),
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
-            f"总 {self._output_duration:.2f}s",
+            f"总 {total_txt}",
         )
 
         if self._show_key_star:
             kx = self._frame_to_x(self._key_frame)
-            pill = QRectF(max(0.0, min(self.width() - 68, kx - 34)), 1, 68, 17)
-            p.setPen(QPen(QColor("#E4AEEC"), 1))
+            star_txt = f"★{format_sec_frames(self._cover_still_time, self._output_fps)}"
+            pill = QRectF(max(0.0, min(self.width() - 88, kx - 44)), 1, 88, 18)
+            p.setPen(QPen(QColor("#DF9FE8"), 1))
             p.setBrush(QColor("#FADCFE"))
             p.drawRoundedRect(pill, 6, 6)
-            p.setPen(QColor("#6B3475"))
-            p.drawText(pill, Qt.AlignmentFlag.AlignCenter, f"★{self._cover_still_time:.2f}s")
+            p.setPen(QColor("#642E6E"))
+            p.drawText(pill, Qt.AlignmentFlag.AlignCenter, star_txt)
 
-        # 3.0s reference marker inside active range
+        # 3秒0帧 reference marker inside active range
         if self._output_duration > 3.05 and span_w > 40:
             x_3s = sx + (3.0 / self._output_duration) * span_w
-            p.setPen(QPen(QColor("#6B3475"), 1.5, Qt.PenStyle.DashLine))
+            p.setPen(QPen(QColor("#642E6E"), 1.5, Qt.PenStyle.DashLine))
             p.drawLine(QPointF(x_3s, tr.top() - 2), QPointF(x_3s, tr.bottom() + 2))
 
-        # Bottom time ruler
+        # Bottom time ruler (integer seconds, zero decimals)
         if self._output_duration > 0.05 and span_w > 30:
-            step = 0.5 if self._output_duration <= 4.0 else (1.0 if self._output_duration <= 10.0 else 2.0)
-            t = 0.0
+            sec_step = 1 if self._output_duration <= 8.0 else 2
+            sec_tick = 0
             last_label_x = -100.0
-            while t <= self._output_duration + 1e-4:
-                tx = sx + (t / self._output_duration) * span_w
+            while sec_tick <= int(self._output_duration) + 1:
+                if sec_tick > self._output_duration + 0.02:
+                    break
+                tx = sx + (sec_tick / self._output_duration) * span_w
                 p.setPen(QPen(QColor("#A4C6E9"), 1.2))
                 p.drawLine(QPointF(tx, tr.bottom() + 4), QPointF(tx, tr.bottom() + 9))
-                if tx - last_label_x >= 38:
-                    p.setPen(QColor("#5C6484"))
+                if tx - last_label_x >= 36:
+                    p.setPen(QColor("#4F5776"))
                     p.drawText(
-                        QRectF(tx - 18, tr.bottom() + 10, 36, 16),
+                        QRectF(tx - 18, tr.bottom() + 10, 36, 17),
                         Qt.AlignmentFlag.AlignCenter,
-                        f"{t:.1f}s",
+                        f"{sec_tick}秒",
                     )
                     last_label_x = tx
-                t += step
+                sec_tick += sec_step
 
-        # Start & End handles (#838BCC)
+        # Start & End handles (#7D85CC)
         p.setPen(QPen(QColor("#FEFDF9"), 1.5))
-        p.setBrush(QColor("#838BCC"))
+        p.setBrush(QColor("#7D85CC"))
         p.drawRoundedRect(QRectF(sx - 5, tr.top() - 4, 10, tr.height() + 8), 4, 4)
         p.drawRoundedRect(QRectF(ex - 5, tr.top() - 4, 10, tr.height() + 8), 4, 4)
 
         # Playhead cursor
         cx = self._frame_to_x(self._current)
-        p.setPen(QPen(QColor("#6B3475"), 2))
+        p.setPen(QPen(QColor("#642E6E"), 2))
         p.drawLine(QPointF(cx, tr.top() - 6), QPointF(cx, tr.bottom() + 6))
 
     def mousePressEvent(self, event: QMouseEvent) -> None:

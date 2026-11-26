@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -81,6 +82,33 @@ def list_available_rife_models() -> list[str]:
         if child.is_dir() and child.name not in models and (child / "flownet.bin").is_file():
             models.append(child.name)
     return models
+
+
+@cache
+def list_vulkan_gpus() -> list[tuple[int, str]]:
+    """Return available Vulkan GPU devices reported by rife-ncnn-vulkan -l."""
+    rife_exe = find_rife()
+    if rife_exe is None:
+        return []
+    proc = subprocess.run(
+        [str(rife_exe), "-l"],
+        cwd=str(rife_exe.parent),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        creationflags=_creation_flags(),
+    )
+    text = (proc.stdout or "") + "\n" + (proc.stderr or "")
+    gpus: list[tuple[int, str]] = []
+    seen: set[int] = set()
+    for match in re.finditer(r"\[(\d+)\s+([^\]]+)\]", text):
+        gid = int(match.group(1))
+        name = match.group(2).strip()
+        if gid not in seen:
+            seen.add(gid)
+            gpus.append((gid, name))
+    return gpus
 
 
 @cache
