@@ -1,0 +1,22 @@
+# Byte-compiled / caches
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+dist/
+build/
+
+# External binaries & downloaded AI models (use scripts/setup_rife.py or in-app button)
+bin/
+
+# IDE & OS
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
+
+# Temporary exports
+*.log
+USB_DCIM_Test/
+LivePhoto_Output/

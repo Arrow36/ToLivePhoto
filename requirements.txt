@@ -1,0 +1,7 @@
+PySide6>=6.7
+Pillow>=10.0
+pillow-heif>=1.7
+opencv-python>=4.9
+numpy>=1.26
+psutil>=5.9
+win32-setctime>=1.1
