@@ -284,11 +284,11 @@ class ConversionJob:
     mute: bool = False
     fps_mode: FpsMode = "keep_original"
     custom_fps: float = 30.0
-    rife_mode: RifeMode = "target_fps"
+    rife_mode: RifeMode = "multiplier"
     rife_multiplier: int = 2
     rife_model: str = "rife-v4.6"
     rife_gpu_id: int = 0
-    rife_playback_policy: RifePlaybackPolicy = "keep_duration"
+    rife_playback_policy: RifePlaybackPolicy = "custom_fps"
     audio_retime_mode: AudioRetimeMode = "speed_sync"
     key_source: KeyPhotoSource = "video_frame"
     key_frame_index: int = 0

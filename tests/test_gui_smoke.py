@@ -87,6 +87,10 @@ def test_tolivephoto_gui_v23_offscreen(tmp_path: Path) -> None:
     assert "ToLivePhoto" in win.windowTitle()
     assert win.rb_keep.isChecked()
     assert win.spin_custom_fps.value() == 30.0
+    assert ("target_fps", 1) not in win._rife_mode_buttons
+    assert ("multiplier", 2) in win._rife_mode_buttons
+    assert win._rife_mode_buttons[("multiplier", 2)].isChecked()
+    assert not hasattr(win, "seg_rife_policy")
     assert win.spin_custom_edge.value() == 0
     assert list(LONG_EDGE_PRESETS) == [0, 2160, 1440, 1080, 720]
     assert list(FPS_PRESET_VALUES) == [24, 25, 30, 60]

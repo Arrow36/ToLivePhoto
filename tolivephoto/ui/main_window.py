@@ -274,7 +274,7 @@ class MainWindow(QMainWindow):
         self._custom_ratio: float | None = None
         self._orientation = "portrait"
         self._active_polaroid: str | None = None
-        self._selected_rife_mode = "target_fps"
+        self._selected_rife_mode = "multiplier"
         self._selected_rife_mult = 2
         default_rife = "rife-v4.6" if "rife-v4.6" in self._rife_models else (
             self._rife_models[0] if self._rife_models else "ffmpeg_minterpolate"
@@ -773,10 +773,9 @@ class MainWindow(QMainWindow):
 
         row_rm = QHBoxLayout()
         row_rm.setSpacing(5)
-        row_rm.addWidget(_field_lbl("补帧方式"))
+        row_rm.addWidget(_field_lbl("补帧倍率"))
         self.rife_mode_group = QButtonGroup(self)
         for label, rmode, rmult in (
-            ("目标帧率", "target_fps", 1),
             ("2x", "multiplier", 2),
             ("3x", "multiplier", 3),
             ("4x", "multiplier", 4),
@@ -787,7 +786,7 @@ class MainWindow(QMainWindow):
             rb.clicked.connect(lambda _=False, m=rmode, k=rmult: self._on_rife_mode_clicked(m, k))
             row_rm.addWidget(rb, 1)
             self._rife_mode_buttons[(rmode, rmult)] = rb
-        self._rife_mode_buttons[("target_fps", 1)].setChecked(True)
+        self._rife_mode_buttons[("multiplier", 2)].setChecked(True)
         self.btn_dl_rife = QPushButton("⬇ 下载 RIFE")
         self.btn_dl_rife.setVisible(find_rife() is None)
         self.btn_dl_rife.clicked.connect(self._on_download_rife)
@@ -836,25 +835,13 @@ class MainWindow(QMainWindow):
         if self._selected_rife_gpu in self._rife_gpu_buttons:
             self._rife_gpu_buttons[self._selected_rife_gpu].setChecked(True)
         rife_lay.addLayout(row_rgpu)
-
-        self.rife_policy_row = QWidget()
-        rp_lay = QHBoxLayout(self.rife_policy_row)
-        rp_lay.setContentsMargins(0, 0, 0, 0)
-        rp_lay.setSpacing(6)
-        rp_lay.addWidget(_field_lbl("倍率播放"))
-        self.seg_rife_policy = SegmentedBar(
-            [("保持原时长(倍增帧率)", "keep_duration"), ("自定义帧率(慢放)", "custom_fps")]
-        )
-        self.seg_rife_policy.selectionChanged.connect(lambda _k: self._on_fps_mode_changed())
-        rp_lay.addWidget(self.seg_rife_policy, 1)
-        rife_lay.addWidget(self.rife_policy_row)
         adv_lay.addWidget(self.rife_panel)
 
         self.custom_fps_panel = QWidget()
         cf_lay = QHBoxLayout(self.custom_fps_panel)
         cf_lay.setContentsMargins(0, 2, 0, 0)
         cf_lay.setSpacing(5)
-        cf_lay.addWidget(_field_lbl("目标帧率"))
+        cf_lay.addWidget(_field_lbl("播放帧率"))
         self.spin_custom_fps = NoWheelDoubleSpinBox()
         self.spin_custom_fps.setRange(1.0, 240.0)
         self.spin_custom_fps.setDecimals(0)
@@ -1270,10 +1257,10 @@ class MainWindow(QMainWindow):
                 self.spin_custom_fps.setValue(30.0)
             elif key == "rife_fast":
                 self.seg_fps_mode.setCurrentKey("rife_interpolate")
-                self._selected_rife_mode = "target_fps"
-                self._selected_rife_mult = 1
-                if ("target_fps", 1) in self._rife_mode_buttons:
-                    self._rife_mode_buttons[("target_fps", 1)].setChecked(True)
+                self._selected_rife_mode = "multiplier"
+                self._selected_rife_mult = 2
+                if ("multiplier", 2) in self._rife_mode_buttons:
+                    self._rife_mode_buttons[("multiplier", 2)].setChecked(True)
                 self.spin_custom_fps.setValue(30.0)
                 fast_model = "rife-v4.6" if "rife-v4.6" in self._rife_models else (
                     self._rife_models[0] if self._rife_models else "ffmpeg_minterpolate"
@@ -1362,11 +1349,11 @@ class MainWindow(QMainWindow):
             bg_color=self._bg_color_hex,
             bg_blur_sigma=self.slider_blur.value(),
             fps_mode="keep_original",
-            rife_mode="target_fps",
-            rife_multiplier=1,
+            rife_mode="multiplier",
+            rife_multiplier=2,
             rife_model=self._selected_rife_model,
             rife_gpu_id=self._selected_rife_gpu,
-            rife_playback_policy="keep_duration",
+            rife_playback_policy="custom_fps",
             custom_fps=30.0,
             key_source="video_frame",
             key_frame_index=min(max(0, info.nb_frames - 1), max(0, info.nb_frames - 1) // 2),
@@ -1396,11 +1383,11 @@ class MainWindow(QMainWindow):
         st.bg_color = self._bg_color_hex
         st.bg_blur_sigma = self.slider_blur.value()
         st.fps_mode = str(self.seg_fps_mode.currentKey() or "keep_original")
-        st.rife_mode = self._selected_rife_mode
-        st.rife_multiplier = self._selected_rife_mult
+        st.rife_mode = "multiplier"
+        st.rife_multiplier = max(2, self._selected_rife_mult)
         st.rife_model = self._selected_rife_model
         st.rife_gpu_id = self._selected_rife_gpu
-        st.rife_playback_policy = str(self.seg_rife_policy.currentKey() or "keep_duration")
+        st.rife_playback_policy = "custom_fps"
         st.custom_fps = self.spin_custom_fps.value()
         st.key_source = str(self.seg_key_source.currentKey() or "video_frame")
         st.key_frame_index = self.spin_key_frame.value()
@@ -1482,17 +1469,16 @@ class MainWindow(QMainWindow):
 
             fps_key = "rife_interpolate" if st.fps_mode == "ffmpeg_minterpolate" else st.fps_mode
             self.seg_fps_mode.setCurrentKey(fps_key)
-            self._selected_rife_mode = st.rife_mode
-            self._selected_rife_mult = st.rife_multiplier
-            if (st.rife_mode, st.rife_multiplier) in self._rife_mode_buttons:
-                self._rife_mode_buttons[(st.rife_mode, st.rife_multiplier)].setChecked(True)
+            self._selected_rife_mode = "multiplier"
+            self._selected_rife_mult = max(2, st.rife_multiplier)
+            if ("multiplier", self._selected_rife_mult) in self._rife_mode_buttons:
+                self._rife_mode_buttons[("multiplier", self._selected_rife_mult)].setChecked(True)
             self._selected_rife_model = st.rife_model
             if st.rife_model in self._rife_model_buttons:
                 self._rife_model_buttons[st.rife_model].setChecked(True)
             self._selected_rife_gpu = st.rife_gpu_id
             if st.rife_gpu_id in self._rife_gpu_buttons:
                 self._rife_gpu_buttons[st.rife_gpu_id].setChecked(True)
-            self.seg_rife_policy.setCurrentKey(st.rife_playback_policy)
             self.spin_custom_fps.setValue(st.custom_fps)
 
             self._external_key_path = st.external_key_path
@@ -2142,16 +2128,7 @@ class MainWindow(QMainWindow):
         is_retime = mode == "raw_retime"
         is_rife = mode == "rife_interpolate"
         self.rife_panel.setVisible(is_rife)
-
-        is_mult = is_rife and self._selected_rife_mode == "multiplier"
-        self.rife_policy_row.setVisible(is_mult)
-
-        show_custom_fps = (
-            is_retime
-            or (is_rife and not is_mult)
-            or (is_mult and self.seg_rife_policy.currentKey() == "custom_fps")
-        )
-        self.custom_fps_panel.setVisible(show_custom_fps)
+        self.custom_fps_panel.setVisible(is_retime or is_rife)
         if not self._syncing_ui:
             self._sync_simple_controls_from_state()
         self._update_summary()
@@ -2448,11 +2425,11 @@ class MainWindow(QMainWindow):
             mute=is_mute,
             fps_mode=fps_mode,  # type: ignore[arg-type]
             custom_fps=self.spin_custom_fps.value(),
-            rife_mode=self._selected_rife_mode,  # type: ignore[arg-type]
-            rife_multiplier=max(2, self._selected_rife_mult) if self._selected_rife_mode == "multiplier" else 2,
+            rife_mode="multiplier",
+            rife_multiplier=max(2, self._selected_rife_mult),
             rife_model=self._selected_rife_model,
             rife_gpu_id=self._selected_rife_gpu,
-            rife_playback_policy=str(self.seg_rife_policy.currentKey() or "keep_duration"),  # type: ignore[arg-type]
+            rife_playback_policy="custom_fps",
             audio_retime_mode=audio_retime_mode,  # type: ignore[arg-type]
             key_source="video_frame" if self.rb_key_video.isChecked() else "external_image",
             key_frame_index=self.spin_key_frame.value(),
@@ -2499,11 +2476,11 @@ class MainWindow(QMainWindow):
             mute=(st.audio_mode == "mute"),
             fps_mode=fps_mode,  # type: ignore[arg-type]
             custom_fps=st.custom_fps,
-            rife_mode=st.rife_mode,  # type: ignore[arg-type]
+            rife_mode="multiplier",
             rife_multiplier=max(2, st.rife_multiplier),
             rife_model=st.rife_model,
             rife_gpu_id=st.rife_gpu_id,
-            rife_playback_policy=st.rife_playback_policy,  # type: ignore[arg-type]
+            rife_playback_policy="custom_fps",
             audio_retime_mode="trim_fade" if st.audio_mode == "trim_fade" else "speed_sync",
             key_source=st.key_source,  # type: ignore[arg-type]
             key_frame_index=st.key_frame_index,

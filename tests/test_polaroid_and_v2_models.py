@@ -54,12 +54,14 @@ def test_rife_default_30fps_and_keep_original_default() -> None:
     job = ConversionJob(video_path=Path("dummy.mp4"), start_frame=0, end_frame=58, crop=CropRect(0, 0, 2160, 3240))
     assert job.fps_mode == "keep_original"
     assert job.custom_fps == 30.0
-    assert job.rife_mode == "target_fps"
+    assert job.rife_mode == "multiplier"
+    assert job.rife_multiplier == 2
+    assert job.rife_playback_policy == "custom_fps"
 
     job.fps_mode = "rife_interpolate"
     s = compute_timeline_summary(info, job)
     assert s.output_fps == 30.0
-    assert s.output_frames == 74  # 59 * 30 / 24 = 73.75 -> 74 frames keeping original speed
+    assert s.output_frames == 118  # 59 * 2 = 118 frames preserving 100% original frames @ 30fps
 
 
 def test_compute_3s_trim_around_key_preserves_fps() -> None:
