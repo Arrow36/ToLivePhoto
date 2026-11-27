@@ -432,19 +432,36 @@ def read_exif_from_file(path: Path) -> ExifMetadata:
     return ExifMetadata()
 
 
-def find_matching_sidecar_exif_file(video_path: Path) -> Path | None:
-    """Locate a same-stem RAW or photo file beside video_path for quick EXIF import."""
-    parent = video_path.parent
-    stem = video_path.stem.lower()
-    if not parent.is_dir():
+def _find_in_dir(directory: Path, stem_lower: str) -> Path | None:
+    if not directory.is_dir():
         return None
     by_ext: dict[str, Path] = {}
-    for entry in parent.iterdir():
-        if entry.is_file() and entry.stem.lower() == stem:
+    for entry in directory.iterdir():
+        if entry.is_file() and entry.stem.lower() == stem_lower:
             ext = entry.suffix.lower()
             if ext in SIDECAR_EXIF_EXTENSIONS:
                 by_ext[ext] = entry
     for ext in SIDECAR_EXIF_EXTENSIONS:
         if ext in by_ext:
             return by_ext[ext]
+    return None
+
+
+def find_matching_sidecar_exif_file(video_path: Path, search_dir: Path | None = None) -> Path | None:
+    """Locate a same-stem RAW or photo file beside video_path or inside an explicit search_dir."""
+    base_dir = Path(search_dir) if search_dir is not None else video_path.parent
+    stem_lower = video_path.stem.lower()
+    if not base_dir.is_dir():
+        return None
+
+    direct = _find_in_dir(base_dir, stem_lower)
+    if direct is not None:
+        return direct
+
+    if search_dir is not None:
+        for sub in sorted(base_dir.iterdir()):
+            if sub.is_dir():
+                hit = _find_in_dir(sub, stem_lower)
+                if hit is not None:
+                    return hit
     return None

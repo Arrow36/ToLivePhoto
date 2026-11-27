@@ -169,6 +169,40 @@ class CropPreviewWidget(QWidget):
             y = (self._video_h - h) // 2
         self.set_crop(CropRect(x, y, w, h), emit=True)
 
+    def align_crop(self, mode: str) -> None:
+        """Align the current crop rectangle inside the source video frame."""
+        if self._video_w <= 0 or self._video_h <= 0:
+            return
+        c = self._crop
+        nx, ny = c.x, c.y
+        if mode == "center":
+            nx = (self._video_w - c.w) // 2
+            ny = (self._video_h - c.h) // 2
+        elif mode == "center_h":
+            nx = (self._video_w - c.w) // 2
+        elif mode == "center_v":
+            ny = (self._video_h - c.h) // 2
+        elif mode == "left":
+            nx = 0
+        elif mode == "right":
+            nx = self._video_w - c.w
+        elif mode == "top":
+            ny = 0
+        elif mode == "bottom":
+            ny = self._video_h - c.h
+        self.set_crop(CropRect(nx, ny, c.w, c.h), emit=True)
+
+    def swap_crop_orientation(self, fit_mode: str = "inside") -> None:
+        """Flip active aspect ratio / crop box between portrait and landscape."""
+        if self._video_w <= 0 or self._video_h <= 0:
+            return
+        if self._aspect_ratio is not None and self._aspect_ratio > 0:
+            self.apply_aspect_fit(1.0 / self._aspect_ratio, mode=fit_mode)
+            return
+        c = self._crop
+        if c.w != c.h:
+            self.apply_aspect_fit(c.h / max(1, c.w), mode=fit_mode)
+
     def _compute_workspace(self) -> tuple[float, float, float]:
         if self._drag_workspace is not None:
             return self._drag_workspace

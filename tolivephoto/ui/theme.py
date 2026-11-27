@@ -1,6 +1,9 @@
-"""60-30-10 Pastel Studio color palette, DPI font scaling, & studio QSS stylesheet for ToLivePhoto."""
+"""60-30-10 Pastel Studio palette, ByteDance DouyinSans font loader, DPI scaling & QSS for ToLivePhoto."""
 from __future__ import annotations
 
+from pathlib import Path
+
+from PySide6.QtGui import QFont, QFontDatabase
 from PySide6.QtWidgets import QApplication
 
 PALETTE = {
@@ -28,6 +31,28 @@ PALETTE = {
     "border_soft": "#D4E0F4",
 }
 
+_FONT_FAMILY_CACHE: str | None = None
+_FONT_PATH = Path(__file__).resolve().parent.parent / "assets" / "fonts" / "DouyinSansBold.ttf"
+
+
+def ensure_bytedance_font(app: QApplication | None = None) -> str:
+    """Register bundled ByteDance DouyinSans font and apply it to QApplication."""
+    global _FONT_FAMILY_CACHE
+    if _FONT_FAMILY_CACHE is None:
+        family = "Microsoft YaHei UI"
+        if _FONT_PATH.is_file():
+            font_id = QFontDatabase.addApplicationFont(str(_FONT_PATH))
+            if font_id >= 0:
+                families = QFontDatabase.applicationFontFamilies(font_id)
+                if families:
+                    family = families[0]
+        _FONT_FAMILY_CACHE = family
+
+    target_app = app or QApplication.instance()
+    if target_app is not None and _FONT_FAMILY_CACHE:
+        target_app.setFont(QFont(_FONT_FAMILY_CACHE))
+    return _FONT_FAMILY_CACHE
+
 
 def compute_dpi_font_scale(app: QApplication | None = None) -> float:
     """Scale UI typography slightly upward on high-DPI displays (e.g. 4K 150%-200%)."""
@@ -48,7 +73,7 @@ def compute_dpi_font_scale(app: QApplication | None = None) -> float:
     return 1.05
 
 
-def build_pastel_stylesheet(scale: float = 1.12) -> str:
+def build_pastel_stylesheet(scale: float = 1.12, font_family: str = "Douyin Sans") -> str:
     base_px = max(12, int(round(12 * scale)))
     small_px = max(11, int(round(11 * scale)))
     title_px = max(13, int(round(13.5 * scale)))
@@ -56,55 +81,59 @@ def build_pastel_stylesheet(scale: float = 1.12) -> str:
     input_h = max(24, int(round(22 * scale)))
 
     return f"""
-QMainWindow, QWidget {{
+QMainWindow, QWidget, QDialog {{
     background-color: {PALETTE["window_bg"]};
     color: {PALETTE["ink_primary"]};
-    font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif;
+    font-family: "{font_family}", "Microsoft YaHei UI", "Segoe UI", sans-serif;
     font-size: {base_px}px;
 }}
 QDialog {{
     background-color: {PALETTE["card_bg"]};
-    color: {PALETTE["ink_primary"]};
 }}
 QWidget#queueChipsHost {{
     background-color: transparent;
 }}
-QFrame#brandHeader, QFrame#sectionCard, QFrame#stageCard, QFrame#exportFooter, QFrame#queueBar, QFrame#liveSummaryBar {{
+QFrame#brandHeader, QFrame#stageCard, QFrame#studioCard, QFrame#videoInfoBar {{
     background-color: {PALETTE["card_bg"]};
     border: 1px solid {PALETTE["border_soft"]};
     border-radius: 12px;
 }}
-QFrame#navStepBar {{
-    background-color: {PALETTE["card_bg"]};
+QFrame#thumbQueueCard {{
+    background-color: {PALETTE["surface_subtle"]};
     border: 1px solid {PALETTE["border_soft"]};
-    border-radius: 10px;
+    border-radius: 9px;
+}}
+QFrame#thumbQueueCard:hover {{
+    border-color: {PALETTE["sky"]};
+    background-color: #EDF2FC;
+}}
+QFrame#thumbQueueCardActive {{
+    background-color: {PALETTE["lavender_soft"]};
+    border: 2px solid {PALETTE["indigo"]};
+    border-radius: 9px;
 }}
 QFrame#segmentedBar {{
     background-color: {PALETTE["surface_recessed"]};
     border: 1px solid {PALETTE["border_soft"]};
     border-radius: 9px;
 }}
+QFrame#sectionDivider {{
+    background-color: {PALETTE["border_soft"]};
+    max-height: 1px;
+    min-height: 1px;
+    border: none;
+}}
 QLabel {{
     background-color: transparent;
 }}
 QLabel#fieldLabel {{
     color: {PALETTE["ink_secondary"]};
-    font-weight: 600;
     font-size: {small_px}px;
 }}
-QLabel#sectionBadge {{
-    background-color: {PALETTE["lavender_soft"]};
-    color: {PALETTE["indigo"]};
-    border: 1px solid {PALETTE["lavender"]};
-    border-radius: 6px;
-    padding: 2px 7px;
-    font-weight: bold;
-    font-size: {small_px}px;
-}}
-QLabel#sectionTitle {{
-    color: {PALETTE["ink_primary"]};
-    font-weight: bold;
+QLabel#subSectionHeader {{
+    color: {PALETTE["indigo_pressed"]};
     font-size: {title_px}px;
+    padding-top: 2px;
 }}
 QLabel#livePill {{
     background-color: {PALETTE["sakura"]};
@@ -112,7 +141,6 @@ QLabel#livePill {{
     border: 1px solid {PALETTE["sakura_border"]};
     border-radius: 8px;
     padding: 2px 9px;
-    font-weight: bold;
     font-size: {small_px}px;
 }}
 QLabel#metaCapsule {{
@@ -159,46 +187,12 @@ QPushButton#segBtn {{
 }}
 QPushButton#segBtn:hover {{
     color: {PALETTE["ink_primary"]};
-    background-color: rgba(254, 253, 249, 0.65);
+    background-color: rgba(254, 253, 249, 0.7);
 }}
 QPushButton#segBtn:checked {{
     background-color: {PALETTE["card_bg"]};
-    border: 1px solid {PALETTE["sky"]};
+    border: 1px solid {PALETTE["indigo"]};
     color: {PALETTE["indigo_pressed"]};
-    font-weight: bold;
-}}
-QPushButton#navStepBtn {{
-    background-color: transparent;
-    border: 1px solid transparent;
-    border-radius: 8px;
-    padding: 6px 8px;
-    color: {PALETTE["ink_secondary"]};
-    font-weight: 600;
-    font-size: {small_px}px;
-}}
-QPushButton#navStepBtn:hover {{
-    background-color: {PALETTE["surface_subtle"]};
-    color: {PALETTE["ink_primary"]};
-}}
-QPushButton#navStepBtn:checked {{
-    background-color: {PALETTE["indigo"]};
-    border-color: {PALETTE["indigo"]};
-    color: {PALETTE["card_bg"]};
-    font-weight: bold;
-}}
-QPushButton#summaryPillBtn {{
-    background-color: {PALETTE["surface_subtle"]};
-    border: 1px solid {PALETTE["border_soft"]};
-    border-radius: 7px;
-    padding: 4px 8px;
-    color: {PALETTE["ink_secondary"]};
-    font-size: {small_px}px;
-    text-align: left;
-}}
-QPushButton#summaryPillBtn:hover {{
-    border-color: {PALETTE["indigo"]};
-    background-color: {PALETTE["lavender_soft"]};
-    color: {PALETTE["ink_primary"]};
 }}
 QPushButton#heroPlayBtn {{
     background-color: {PALETTE["indigo"]};
@@ -206,7 +200,6 @@ QPushButton#heroPlayBtn {{
     border-radius: 8px;
     padding: 6px 14px;
     color: {PALETTE["card_bg"]};
-    font-weight: bold;
 }}
 QPushButton#heroPlayBtn:hover {{
     background-color: {PALETTE["indigo_hover"]};
@@ -214,30 +207,11 @@ QPushButton#heroPlayBtn:hover {{
 QPushButton#heroPlayBtn:pressed {{
     background-color: {PALETTE["indigo_pressed"]};
 }}
-QPushButton#modeOptionBtn {{
-    text-align: left;
-    padding: 6px 10px;
-    border-radius: 8px;
-    background-color: {PALETTE["surface_subtle"]};
-    border: 1px solid {PALETTE["border_soft"]};
-    color: {PALETTE["ink_secondary"]};
-}}
-QPushButton#modeOptionBtn:hover {{
-    background-color: #EFECFB;
-    border-color: {PALETTE["lavender"]};
-    color: {PALETTE["ink_primary"]};
-}}
-QPushButton#modeOptionBtn:checked {{
-    background-color: {PALETTE["lavender_soft"]};
-    border: 2px solid {PALETTE["indigo"]};
-    color: {PALETTE["ink_primary"]};
-    font-weight: bold;
-}}
 QPushButton#chipBtn {{
     background-color: {PALETTE["surface_subtle"]};
     border: 1px solid {PALETTE["border_soft"]};
     border-radius: 7px;
-    padding: 5px 8px;
+    padding: 5px 7px;
     color: {PALETTE["ink_secondary"]};
     font-size: {small_px}px;
 }}
@@ -250,7 +224,6 @@ QPushButton#chipBtn:checked {{
     background-color: {PALETTE["indigo"]};
     border: 1px solid {PALETTE["indigo"]};
     color: {PALETTE["card_bg"]};
-    font-weight: bold;
 }}
 QPushButton#fpsChipBtn {{
     background-color: {PALETTE["surface_subtle"]};
@@ -258,7 +231,6 @@ QPushButton#fpsChipBtn {{
     border-radius: 7px;
     padding: 5px 6px;
     color: {PALETTE["ink_secondary"]};
-    font-weight: bold;
 }}
 QPushButton#fpsChipBtn:hover {{
     border-color: {PALETTE["sky"]};
@@ -273,7 +245,6 @@ QPushButton#primaryBtn {{
     background-color: {PALETTE["indigo"]};
     border: 1px solid {PALETTE["indigo"]};
     border-radius: 9px;
-    font-weight: bold;
     font-size: {cta_px}px;
     padding: 9px 16px;
     color: {PALETTE["card_bg"]};
@@ -293,7 +264,6 @@ QPushButton#keyStarBtn {{
     background-color: {PALETTE["sakura"]};
     border: 1px solid {PALETTE["sakura_border"]};
     color: {PALETTE["sakura_ink"]};
-    font-weight: bold;
     border-radius: 7px;
     padding: 5px 10px;
 }}
@@ -304,7 +274,6 @@ QPushButton#cropToggleBtn {{
     background-color: {PALETTE["card_bg"]};
     border: 1px solid {PALETTE["sky"]};
     color: {PALETTE["ink_primary"]};
-    font-weight: bold;
     border-radius: 7px;
 }}
 QPushButton#cropToggleBtn:checked {{
@@ -366,7 +335,6 @@ QProgressBar {{
     border-radius: 7px;
     text-align: center;
     color: {PALETTE["ink_primary"]};
-    font-weight: bold;
     height: 20px;
 }}
 QProgressBar::chunk {{
@@ -408,6 +376,16 @@ QScrollBar::handle:vertical:hover {{
 }}
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0px; }}
 QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: transparent; }}
+QScrollBar:horizontal {{
+    background: transparent;
+    height: 6px;
+    margin: 0 2px;
+}}
+QScrollBar::handle:horizontal {{
+    background: {PALETTE["sky"]};
+    border-radius: 3px;
+    min-width: 28px;
+}}
 """
 
 

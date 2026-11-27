@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
@@ -47,8 +48,8 @@ class ExifEditorDialog(QDialog):
         self.btn_import = QPushButton("📥 从照片 / RAW 导入 EXIF...")
         self.btn_import.setObjectName("cropToggleBtn")
         self.btn_import.clicked.connect(self._on_import_file)
-        self.btn_auto_match = QPushButton("🪄 自动匹配同名 RAW/照片")
-        self.btn_auto_match.clicked.connect(self._on_auto_match)
+        self.btn_auto_match = QPushButton("📂 选择文件夹匹配同名 RAW...")
+        self.btn_auto_match.clicked.connect(self._on_auto_match_folder)
         self.btn_auto_match.setEnabled(self._video_path is not None)
         self.btn_clear = QPushButton("清空还原默认")
         self.btn_clear.clicked.connect(self._on_clear)
@@ -176,12 +177,26 @@ class ExifEditorDialog(QDialog):
             return
         self._load_meta_to_fields(meta)
 
-    def _on_auto_match(self) -> None:
+    def _on_auto_match_folder(self) -> None:
         if self._video_path is None:
             return
-        match = find_matching_sidecar_exif_file(self._video_path)
+        settings = QSettings("Arrow36", "ToLivePhoto")
+        last_dir = str(settings.value("exif_search_dir", str(self._video_path.parent)))
+        folder = QFileDialog.getExistingDirectory(
+            self,
+            f"选择包含 {self._video_path.stem} 同名 RAW / 照片的文件夹",
+            last_dir,
+        )
+        if not folder:
+            return
+        settings.setValue("exif_search_dir", folder)
+        match = find_matching_sidecar_exif_file(self._video_path, Path(folder))
         if match is None:
-            QMessageBox.information(self, "未找到同名文件", f"未在 {self._video_path.parent} 下找到同名的 RAW 或照片文件。")
+            QMessageBox.information(
+                self,
+                "未找到同名文件",
+                f"未在 {folder}（含一级子目录）下找到与「{self._video_path.stem}」同名的 RAW 或照片文件。",
+            )
             return
         try:
             meta = read_exif_from_file(match)
