@@ -1,4 +1,4 @@
-"""Interactive full-resolution canvas with #FEFDF9 porcelain backdrop, Polaroid sheet rendering, wheel zoom & drag pan."""
+"""Interactive full-resolution canvas with #FEFDF9 porcelain backdrop, Polaroid sheet, double-click zoom & hold-to-compare."""
 from __future__ import annotations
 
 import cv2
@@ -29,7 +29,7 @@ class CropPreviewWidget(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setMinimumSize(460, 400)
+        self.setMinimumSize(460, 380)
         self.setMouseTracking(True)
 
         self._qimage: QImage | None = None
@@ -49,6 +49,7 @@ class CropPreviewWidget(QWidget):
         self._backdrop_hex: str = "#FEFDF9"
 
         self._crop_editing: bool = False
+        self._compare_original: bool = False
         self._zoom: float = 1.0
         self._pan = QPointF(0.0, 0.0)
 
@@ -73,6 +74,13 @@ class CropPreviewWidget(QWidget):
 
     def is_crop_editing(self) -> bool:
         return self._crop_editing
+
+    def set_compare_original(self, active: bool) -> None:
+        self._compare_original = bool(active)
+        self.update()
+
+    def is_comparing_original(self) -> bool:
+        return self._compare_original
 
     def set_backdrop_color(self, hex_color: str) -> None:
         self._backdrop_hex = hex_color
@@ -162,22 +170,24 @@ class CropPreviewWidget(QWidget):
         self.set_crop(CropRect(x, y, w, h), emit=True)
 
     def _compute_workspace(self) -> tuple[float, float, float]:
-        """Compute (origin_x, origin_y, scale) incorporating zoom, pan, and outer Polaroid padding."""
         if self._drag_workspace is not None:
             return self._drag_workspace
 
-        sx1 = self._crop.x - self._padding.left
-        sy1 = self._crop.y - self._padding.top
-        sx2 = self._crop.x + self._crop.w + self._padding.right
-        sy2 = self._crop.y + self._crop.h + self._padding.bottom
-
-        if self._crop_editing:
-            ux1 = min(0, sx1)
-            uy1 = min(0, sy1)
-            ux2 = max(self._video_w, sx2)
-            uy2 = max(self._video_h, sy2)
+        if self._compare_original:
+            ux1, uy1, ux2, uy2 = 0, 0, self._video_w, self._video_h
         else:
-            ux1, uy1, ux2, uy2 = sx1, sy1, sx2, sy2
+            sx1 = self._crop.x - self._padding.left
+            sy1 = self._crop.y - self._padding.top
+            sx2 = self._crop.x + self._crop.w + self._padding.right
+            sy2 = self._crop.y + self._crop.h + self._padding.bottom
+
+            if self._crop_editing:
+                ux1 = min(0, sx1)
+                uy1 = min(0, sy1)
+                ux2 = max(self._video_w, sx2)
+                uy2 = max(self._video_h, sy2)
+            else:
+                ux1, uy1, ux2, uy2 = sx1, sy1, sx2, sy2
 
         uw = max(10.0, float(ux2 - ux1))
         uh = max(10.0, float(uy2 - uy1))
@@ -297,15 +307,30 @@ class CropPreviewWidget(QWidget):
 
         ws = self._compute_workspace()
         vrect = self._video_widget_rect(ws)
+        src_rect = QRectF(self._pixmap.rect())
+
+        if self._compare_original:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(37, 41, 58, 22))
+            painter.drawRoundedRect(vrect.translated(2.0, 4.0), 4.0, 4.0)
+            painter.drawPixmap(vrect, self._pixmap, src_rect)
+            painter.setPen(QPen(QColor("#DF9FE8"), 1.5))
+            painter.drawRect(vrect)
+
+            badge = QRectF(vrect.left() + 8, vrect.top() + 8, 92, 24)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor("#FADCFE"))
+            painter.drawRoundedRect(badge, 6, 6)
+            painter.setPen(QColor("#642E6E"))
+            painter.drawText(badge, Qt.AlignmentFlag.AlignCenter, "原片对比")
+            return
+
         crect = self._crop_widget_rect(ws)
         srect = self._sheet_widget_rect(ws)
         has_pad = not self._padding.is_zero()
         is_oob = self._crop.is_out_of_bounds(self._video_w, self._video_h) or has_pad
 
-        src_rect = QRectF(self._pixmap.rect())
-
         if not self._crop_editing:
-            # Soft shadow around output card/sheet so white Polaroid paper stands out on #FEFDF9
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(QColor(37, 41, 58, 22))
             painter.drawRoundedRect(srect.translated(2.0, 4.0), 4.0, 4.0)
@@ -403,6 +428,16 @@ class CropPreviewWidget(QWidget):
         self.set_zoom(self._zoom * step, anchor_pos=event.position())
         event.accept()
 
+    def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
+        if self._video_w <= 0 or self._video_h <= 0:
+            return
+        if event.button() == Qt.MouseButton.LeftButton:
+            if abs(self._zoom - 1.0) < 0.05 and abs(self._pan.x()) < 4.0 and abs(self._pan.y()) < 4.0:
+                self.set_zoom(2.0, anchor_pos=event.position())
+            else:
+                self.reset_view()
+            event.accept()
+
     def contextMenuEvent(self, event: QContextMenuEvent) -> None:
         self.contextMenuRequested.emit(event.globalPos())
         event.accept()
@@ -421,7 +456,7 @@ class CropPreviewWidget(QWidget):
             return
 
         ws = self._compute_workspace()
-        if self._crop_editing:
+        if self._crop_editing and not self._compare_original:
             hit = self._hit_test_crop(event.position(), self._crop_widget_rect(ws))
             if hit != self.HANDLE_NONE:
                 self._drag_mode = hit
@@ -442,7 +477,7 @@ class CropPreviewWidget(QWidget):
         scale = ws[2]
 
         if self._drag_mode == self.HANDLE_NONE:
-            if self._crop_editing:
+            if self._crop_editing and not self._compare_original:
                 mode = self._hit_test_crop(event.position(), self._crop_widget_rect(ws))
                 cursors = {
                     self.HANDLE_TL: Qt.CursorShape.SizeFDiagCursor,

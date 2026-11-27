@@ -1,4 +1,4 @@
-"""Main PySide6 desktop studio window for ToLivePhoto v2.0."""
+"""Main PySide6 desktop studio window for ToLivePhoto v2.1 (overflow-free, stepper-driven Studio UI)."""
 from __future__ import annotations
 
 import os
@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QColorDialog,
     QFileDialog,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -33,6 +34,8 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
+    QSplitter,
     QVBoxLayout,
     QWidget,
 )
@@ -68,12 +71,13 @@ from .range_slider import RangeTimelineSlider
 from .theme import PALETTE, build_pastel_stylesheet, compute_dpi_font_scale
 from .widgets import (
     ChipButton,
+    ElidedLabel,
     FourDigitSpinBox,
     NoWheelComboBox,
     NoWheelDoubleSpinBox,
     NoWheelSlider,
     NoWheelSpinBox,
-    OptionPillButton,
+    SegmentedBar,
     StyledCheckBox,
 )
 from .worker import BatchConversionWorker, ConversionWorker, RifeDownloadWorker
@@ -129,8 +133,8 @@ def _make_section_card(badge_num: str, title: str) -> tuple[QFrame, QVBoxLayout]
     card = QFrame()
     card.setObjectName("sectionCard")
     lay = QVBoxLayout(card)
-    lay.setContentsMargins(10, 8, 10, 8)
-    lay.setSpacing(6)
+    lay.setContentsMargins(12, 10, 12, 12)
+    lay.setSpacing(8)
 
     hdr = QHBoxLayout()
     hdr.setSpacing(6)
@@ -143,6 +147,13 @@ def _make_section_card(badge_num: str, title: str) -> tuple[QFrame, QVBoxLayout]
     hdr.addStretch(1)
     lay.addLayout(hdr)
     return card, lay
+
+
+def _field_lbl(text: str, width: int = 68) -> QLabel:
+    lbl = QLabel(text)
+    lbl.setObjectName("fieldLabel")
+    lbl.setFixedWidth(width)
+    return lbl
 
 
 class MainWindow(QMainWindow):
@@ -186,12 +197,14 @@ class MainWindow(QMainWindow):
         self._nvenc_available = has_nvenc()
         self._vulkan_gpus = list_vulkan_gpus()
 
+        self._active_step = 0
         self._active_aspect_key = "orig"
         self._active_polaroid: str | None = None
         self._fps_chip_buttons: list[tuple[int, QPushButton]] = []
         self._aspect_buttons: dict[str, ChipButton] = {}
         self._polaroid_buttons: dict[str, ChipButton] = {}
         self._long_edge_buttons: dict[int, ChipButton] = {}
+        self._nav_step_buttons: list[QPushButton] = []
 
         self._build_ui()
         self._load_persisted_dcf_settings()
@@ -227,7 +240,7 @@ class MainWindow(QMainWindow):
         lbl_pill = QLabel("LIVE STUDIO")
         lbl_pill.setObjectName("livePill")
 
-        self.lbl_video_info = QLabel("未加载视频 (支持拖入多个 MP4 / MOV)")
+        self.lbl_video_info = ElidedLabel("未加载视频 (支持拖入多个 MP4 / MOV)", Qt.TextElideMode.ElideMiddle)
         self.lbl_video_info.setObjectName("metaCapsule")
         self.btn_open = QPushButton("📂 导入视频 (支持多选)...")
         self.btn_open.clicked.connect(self._on_open_videos)
@@ -235,12 +248,12 @@ class MainWindow(QMainWindow):
         h_lay.addWidget(lbl_icon)
         h_lay.addWidget(lbl_brand)
         h_lay.addWidget(lbl_pill)
-        h_lay.addSpacing(6)
+        h_lay.addSpacing(4)
         h_lay.addWidget(self.lbl_video_info, 1)
         h_lay.addWidget(self.btn_open)
         outer.addWidget(header)
 
-        # ---- MULTI-VIDEO QUEUE STRIP ----
+        # ---- SMART MULTI-VIDEO QUEUE BAR (auto-hidden for <= 1 video) ----
         self.queue_bar = QFrame()
         self.queue_bar.setObjectName("queueBar")
         self.queue_bar.setVisible(False)
@@ -256,10 +269,10 @@ class MainWindow(QMainWindow):
         self.queue_scroll.setWidgetResizable(True)
         self.queue_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.queue_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        self.queue_scroll.setFixedHeight(34)
+        self.queue_scroll.setFixedHeight(36)
         self.queue_scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
         self.queue_chips_host = QWidget()
-        self.queue_chips_host.setStyleSheet("background: transparent;")
+        self.queue_chips_host.setObjectName("queueChipsHost")
         self.queue_chips_lay = QHBoxLayout(self.queue_chips_host)
         self.queue_chips_lay.setContentsMargins(0, 0, 0, 0)
         self.queue_chips_lay.setSpacing(5)
@@ -267,7 +280,7 @@ class MainWindow(QMainWindow):
         self.queue_scroll.setWidget(self.queue_chips_host)
         qb_lay.addWidget(self.queue_scroll, 1)
 
-        self.btn_queue_sync = QPushButton("⇄ 同步当前设置到全部")
+        self.btn_queue_sync = QPushButton("⇄ 同步参数到全部")
         self.btn_queue_sync.clicked.connect(self._sync_current_settings_to_all)
         self.btn_queue_clear = QPushButton("清空")
         self.btn_queue_clear.clicked.connect(self._clear_queue)
@@ -275,21 +288,22 @@ class MainWindow(QMainWindow):
         qb_lay.addWidget(self.btn_queue_clear)
         outer.addWidget(self.queue_bar)
 
-        # ---- MAIN BODY: LEFT STAGE + RIGHT INSPECTOR ----
-        body = QHBoxLayout()
-        body.setSpacing(10)
-        outer.addLayout(body, 1)
+        # ---- RESIZABLE MAIN SPLITTER: LEFT STAGE + RIGHT STUDIO INSPECTOR ----
+        self.main_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.main_splitter.setChildrenCollapsible(False)
+        outer.addWidget(self.main_splitter, 1)
 
         # Left Stage Card
         stage_card = QFrame()
         stage_card.setObjectName("stageCard")
+        stage_card.setMinimumWidth(560)
         left_layout = QVBoxLayout(stage_card)
         left_layout.setContentsMargins(10, 8, 10, 8)
         left_layout.setSpacing(6)
 
         stage_top = QHBoxLayout()
         stage_top.setSpacing(6)
-        self.btn_crop_toggle = QPushButton("✂ 裁切画面")
+        self.btn_crop_toggle = QPushButton("✂ 裁切构图")
         self.btn_crop_toggle.setObjectName("cropToggleBtn")
         self.btn_crop_toggle.setCheckable(True)
         self.btn_crop_toggle.setChecked(False)
@@ -297,16 +311,28 @@ class MainWindow(QMainWindow):
 
         self.lbl_crop_res = QLabel("画布: -")
         self.lbl_crop_res.setObjectName("metaCapsule")
-        self.lbl_canvas_hint = QLabel("全分辨率预览 · 滚轮缩放 · 左键拖拽 · 右键菜单")
-        self.lbl_canvas_hint.setStyleSheet(f"color: {PALETTE['ink_muted']};")
-        self.btn_zoom_reset = QPushButton("100% 重置视图")
+
+        self.btn_compare_orig = QPushButton("👁 按住对比原片")
+        self.btn_compare_orig.setToolTip("按住鼠标左键查看未裁切/未加边框的原始画面")
+        self.btn_compare_orig.pressed.connect(lambda: self.preview.set_compare_original(True))
+        self.btn_compare_orig.released.connect(lambda: self.preview.set_compare_original(False))
+
+        self.btn_zoom_out = QPushButton("−")
+        self.btn_zoom_out.setFixedWidth(30)
+        self.btn_zoom_out.clicked.connect(lambda: self.preview.set_zoom(self.preview.get_zoom() / 1.25))
+        self.btn_zoom_reset = QPushButton("100% 适应")
         self.btn_zoom_reset.clicked.connect(lambda: self.preview.reset_view())
+        self.btn_zoom_in = QPushButton("+")
+        self.btn_zoom_in.setFixedWidth(30)
+        self.btn_zoom_in.clicked.connect(lambda: self.preview.set_zoom(self.preview.get_zoom() * 1.25))
 
         stage_top.addWidget(self.btn_crop_toggle)
         stage_top.addWidget(self.lbl_crop_res)
+        stage_top.addWidget(self.btn_compare_orig)
         stage_top.addStretch(1)
-        stage_top.addWidget(self.lbl_canvas_hint)
+        stage_top.addWidget(self.btn_zoom_out)
         stage_top.addWidget(self.btn_zoom_reset)
+        stage_top.addWidget(self.btn_zoom_in)
         left_layout.addLayout(stage_top)
 
         self.preview = CropPreviewWidget()
@@ -316,57 +342,94 @@ class MainWindow(QMainWindow):
         self.preview.contextMenuRequested.connect(self._on_preview_context_menu)
         left_layout.addWidget(self.preview, 1)
 
+        # 3-Cluster Transport Bar
         transport = QHBoxLayout()
-        transport.setSpacing(5)
-        self.btn_jump_in = QPushButton("⏮ 入点")
-        self.btn_prev_frame = QPushButton("◀ -1帧")
-        self.btn_play = QPushButton("▶ 播放")
-        self.btn_next_frame = QPushButton("+1帧 ▶")
-        self.btn_jump_out = QPushButton("出点 ⏭")
+        transport.setSpacing(6)
+
         self.btn_set_in = QPushButton("[ 设为起点")
         self.btn_set_out = QPushButton("设为终点 ]")
-        self.btn_set_key = QPushButton("★ 设为主图 (K)")
-        self.btn_set_key.setObjectName("keyStarBtn")
+        self.btn_set_in.clicked.connect(self._set_current_as_start)
+        self.btn_set_out.clicked.connect(self._set_current_as_end)
+        transport.addWidget(self.btn_set_in)
+        transport.addWidget(self.btn_set_out)
+        transport.addStretch(1)
+
+        self.btn_jump_in = QPushButton("⏮")
+        self.btn_jump_in.setToolTip("跳至片段起点")
+        self.btn_prev_frame = QPushButton("◀ -1帧")
+        self.btn_play = QPushButton("▶ 播放")
+        self.btn_play.setObjectName("heroPlayBtn")
+        self.btn_play.setMinimumWidth(92)
+        self.btn_next_frame = QPushButton("+1帧 ▶")
+        self.btn_jump_out = QPushButton("⏭")
+        self.btn_jump_out.setToolTip("跳至片段终点")
 
         self.btn_jump_in.clicked.connect(lambda: self._seek_frame(self.spin_start.value()))
         self.btn_prev_frame.clicked.connect(lambda: self._seek_frame(self._current_frame - 1))
         self.btn_play.clicked.connect(self._toggle_play)
         self.btn_next_frame.clicked.connect(lambda: self._seek_frame(self._current_frame + 1))
         self.btn_jump_out.clicked.connect(lambda: self._seek_frame(self.spin_end.value()))
-        self.btn_set_in.clicked.connect(self._set_current_as_start)
-        self.btn_set_out.clicked.connect(self._set_current_as_end)
-        self.btn_set_key.clicked.connect(self._set_current_as_key)
 
-        for b in (
-            self.btn_jump_in,
-            self.btn_prev_frame,
-            self.btn_play,
-            self.btn_next_frame,
-            self.btn_jump_out,
-            self.btn_set_in,
-            self.btn_set_out,
-            self.btn_set_key,
-        ):
+        for b in (self.btn_jump_in, self.btn_prev_frame, self.btn_play, self.btn_next_frame, self.btn_jump_out):
             transport.addWidget(b)
+        transport.addStretch(1)
+
+        self.btn_set_key = QPushButton("★ 设为主图 (K)")
+        self.btn_set_key.setObjectName("keyStarBtn")
+        self.btn_set_key.clicked.connect(self._set_current_as_key)
+        transport.addWidget(self.btn_set_key)
         left_layout.addLayout(transport)
 
         self.timeline = RangeTimelineSlider()
         self.timeline.rangeChanged.connect(self._on_slider_range_changed)
         self.timeline.currentFrameChanged.connect(self._seek_frame)
+        self.timeline.keyPillClicked.connect(lambda: self._seek_frame(self.spin_key_frame.value()))
         left_layout.addWidget(self.timeline)
 
+        playhead_row = QHBoxLayout()
         self.lbl_playhead = QLabel("当前: 第 0 帧  |  当前设定下时刻: 0秒0帧 / 0秒0帧")
         self.lbl_playhead.setStyleSheet(f"color: {PALETTE['ink_secondary']};")
-        left_layout.addWidget(self.lbl_playhead)
+        lbl_keys = QLabel("Space 播放 · ←/→ 逐帧 · [ / ] 入出点 · K 设主图 · 双击画布缩放")
+        lbl_keys.setStyleSheet(f"color: {PALETTE['ink_muted']};")
+        playhead_row.addWidget(self.lbl_playhead)
+        playhead_row.addStretch(1)
+        playhead_row.addWidget(lbl_keys)
+        left_layout.addLayout(playhead_row)
 
-        body.addWidget(stage_card, 1)
+        self.main_splitter.addWidget(stage_card)
 
-        # ---- RIGHT INSPECTOR + PINNED FOOTER ----
+        # ---- RIGHT STUDIO INSPECTOR ----
         right_col = QWidget()
-        right_col.setFixedWidth(590)
+        right_col.setMinimumWidth(500)
+        right_col.setMaximumWidth(740)
         right_col_lay = QVBoxLayout(right_col)
         right_col_lay.setContentsMargins(0, 0, 0, 0)
         right_col_lay.setSpacing(8)
+
+        # Top 4-Step Segmented Switcher + Expand All Toggle
+        nav_bar = QFrame()
+        nav_bar.setObjectName("navStepBar")
+        nav_lay = QHBoxLayout(nav_bar)
+        nav_lay.setContentsMargins(5, 4, 5, 4)
+        nav_lay.setSpacing(4)
+        self._nav_btn_group = QButtonGroup(self)
+        for idx, label in enumerate(("01 画面", "02 帧率", "03 封面", "04 导出")):
+            nb = QPushButton(label)
+            nb.setObjectName("navStepBtn")
+            nb.setCheckable(True)
+            nb.setCursor(Qt.CursorShape.PointingHandCursor)
+            nb.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            nb.clicked.connect(lambda _=False, i=idx: self._set_active_step(i))
+            self._nav_btn_group.addButton(nb)
+            nav_lay.addWidget(nb, 1)
+            self._nav_step_buttons.append(nb)
+        self._nav_step_buttons[0].setChecked(True)
+
+        self.btn_expand_all = ChipButton("☰ 展开全部")
+        self.btn_expand_all.setToolTip("切换单步专注模式或同时展开所有设置卡片")
+        self.btn_expand_all.toggled.connect(self._sync_inspector_step_visibility)
+        nav_lay.addWidget(self.btn_expand_all)
+        right_col_lay.addWidget(nav_bar)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -374,93 +437,93 @@ class MainWindow(QMainWindow):
         scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
         cards_wrap = QWidget()
         cards_lay = QVBoxLayout(cards_wrap)
-        cards_lay.setContentsMargins(0, 0, 4, 0)
+        cards_lay.setContentsMargins(0, 0, 2, 0)
         cards_lay.setSpacing(8)
         scroll.setWidget(cards_wrap)
         right_col_lay.addWidget(scroll, 1)
 
-        # Keep hidden spinboxes synced with timeline for clean range control
+        # Hidden range spinboxes kept synced with timeline
         self.spin_start = NoWheelSpinBox()
         self.spin_start.valueChanged.connect(self._on_range_spin_changed)
         self.spin_end = NoWheelSpinBox()
         self.spin_end.valueChanged.connect(self._on_range_spin_changed)
 
-        # ---- CARD 01: Audio Buttons, Aspect Buttons + Manual Ratio, Polaroid Presets, Flat Background ----
-        c1, c1_lay = _make_section_card("01", "声音、比例裁切与拍立得外扩")
+        # ---- CARD 01: Audio, Aspect Grid, Polaroid Grid, Flat Background ----
+        self.c1, c1_lay = _make_section_card("01", "声音、比例裁切与拍立得外扩")
 
         row_audio = QHBoxLayout()
-        row_audio.setSpacing(5)
-        row_audio.addWidget(QLabel("声音:"))
-        self.audio_btn_group = QButtonGroup(self)
-        self.btn_audio_sync = ChipButton("🔊 原声同步变速")
-        self.btn_audio_fade = ChipButton("🔉 原声截断淡出")
-        self.btn_audio_mute = ChipButton("🔇 静音")
-        self.btn_audio_sync.setChecked(True)
-        for btn in (self.btn_audio_sync, self.btn_audio_fade, self.btn_audio_mute):
-            self.audio_btn_group.addButton(btn)
-            btn.toggled.connect(self._update_summary)
-            row_audio.addWidget(btn, 1)
+        row_audio.setSpacing(8)
+        row_audio.addWidget(_field_lbl("声音控制"))
+        self.seg_audio = SegmentedBar(
+            [("🔊 原声同步", "speed_sync"), ("🔉 原声淡出", "trim_fade"), ("🔇 静音", "mute")]
+        )
+        self.seg_audio.selectionChanged.connect(lambda _k: self._update_summary())
+        row_audio.addWidget(self.seg_audio, 1)
         c1_lay.addLayout(row_audio)
 
-        row_ratio = QHBoxLayout()
-        row_ratio.setSpacing(4)
-        row_ratio.addWidget(QLabel("比例:"))
+        ratio_hdr = QHBoxLayout()
+        ratio_hdr.setSpacing(8)
+        ratio_hdr.addWidget(_field_lbl("画面比例"))
+        ratio_grid = QGridLayout()
+        ratio_grid.setSpacing(5)
         self.aspect_btn_group = QButtonGroup(self)
-        for label, key, _r in ASPECT_PRESETS:
+        for idx, (label, key, _r) in enumerate(ASPECT_PRESETS):
             ab = ChipButton(label)
+            ab.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             self.aspect_btn_group.addButton(ab)
             ab.clicked.connect(lambda _=False, k=key: self._on_aspect_button_clicked(k))
-            row_ratio.addWidget(ab)
+            ratio_grid.addWidget(ab, idx // 4, idx % 4)
             self._aspect_buttons[key] = ab
         self._aspect_buttons["orig"].setChecked(True)
-        c1_lay.addLayout(row_ratio)
+        ratio_hdr.addLayout(ratio_grid, 1)
+        c1_lay.addLayout(ratio_hdr)
 
-        row_ratio2 = QHBoxLayout()
-        row_ratio2.setSpacing(5)
-        row_ratio2.addWidget(QLabel("手动比例:"))
+        row_manual = QHBoxLayout()
+        row_manual.setSpacing(6)
+        row_manual.addWidget(_field_lbl("手动比例"))
         self.edit_custom_ratio = QLineEdit()
-        self.edit_custom_ratio.setPlaceholderText("如 5:4 或 16:10")
-        self.edit_custom_ratio.setMaximumWidth(120)
+        self.edit_custom_ratio.setPlaceholderText("如 5:4")
+        self.edit_custom_ratio.setMaximumWidth(100)
         self.edit_custom_ratio.returnPressed.connect(self._apply_manual_ratio)
-        row_ratio2.addWidget(self.edit_custom_ratio)
+        row_manual.addWidget(self.edit_custom_ratio)
         self.btn_apply_ratio = QPushButton("应用")
         self.btn_apply_ratio.clicked.connect(self._apply_manual_ratio)
-        row_ratio2.addWidget(self.btn_apply_ratio)
+        row_manual.addWidget(self.btn_apply_ratio)
 
-        self.btn_fit_inside = ChipButton("内裁填满")
-        self.btn_fit_pad = ChipButton("外扩留边")
-        self.fit_mode_group = QButtonGroup(self)
-        self.fit_mode_group.addButton(self.btn_fit_inside)
-        self.fit_mode_group.addButton(self.btn_fit_pad)
-        self.btn_fit_inside.setChecked(True)
-        self.btn_fit_inside.clicked.connect(lambda: self._reapply_current_aspect("inside"))
-        self.btn_fit_pad.clicked.connect(lambda: self._reapply_current_aspect("pad"))
-        row_ratio2.addWidget(self.btn_fit_inside)
-        row_ratio2.addWidget(self.btn_fit_pad)
+        self.seg_fit_mode = SegmentedBar([("内裁填满", "inside"), ("外扩留边", "pad")])
+        self.seg_fit_mode.selectionChanged.connect(lambda m: self._reapply_current_aspect(str(m)))
+        row_manual.addWidget(self.seg_fit_mode, 1)
+        c1_lay.addLayout(row_manual)
 
-        self.btn_pad_margin = QPushButton("+10%画布")
+        row_canvas_ops = QHBoxLayout()
+        row_canvas_ops.setSpacing(6)
+        row_canvas_ops.addWidget(_field_lbl("画布微调"))
+        self.btn_pad_margin = QPushButton("+10% 外扩画布")
         self.btn_pad_margin.clicked.connect(self._expand_crop_margin)
-        self.btn_reset_crop = QPushButton("重置")
+        self.btn_reset_crop = QPushButton("↺ 重置构图与相纸")
         self.btn_reset_crop.clicked.connect(self._reset_crop)
-        row_ratio2.addWidget(self.btn_pad_margin)
-        row_ratio2.addWidget(self.btn_reset_crop)
-        c1_lay.addLayout(row_ratio2)
+        row_canvas_ops.addWidget(self.btn_pad_margin, 1)
+        row_canvas_ops.addWidget(self.btn_reset_crop, 1)
+        c1_lay.addLayout(row_canvas_ops)
 
-        row_polaroid = QHBoxLayout()
-        row_polaroid.setSpacing(5)
-        row_polaroid.addWidget(QLabel("拍立得:"))
-        self.polaroid_btn_group = QButtonGroup(self)
-        self.polaroid_btn_group.setExclusive(False)
-        for pkey, spec in POLAROID_PRESETS.items():
+        pol_row = QHBoxLayout()
+        pol_row.setSpacing(8)
+        pol_row.addWidget(_field_lbl("拍立得"))
+        pol_grid = QGridLayout()
+        pol_grid.setSpacing(5)
+        for idx, (pkey, spec) in enumerate(POLAROID_PRESETS.items()):
             pb = ChipButton(spec.label)
+            pb.setToolTip(f"{spec.label} ({int(spec.sheet_w_mm)}×{int(spec.sheet_h_mm)}mm)")
+            pb.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             pb.clicked.connect(lambda _=False, k=pkey: self._apply_polaroid_preset(k))
-            row_polaroid.addWidget(pb, 1)
+            pol_grid.addWidget(pb, idx // 2, idx % 2)
             self._polaroid_buttons[pkey] = pb
-        c1_lay.addLayout(row_polaroid)
+        pol_row.addLayout(pol_grid, 1)
+        c1_lay.addLayout(pol_row)
 
         row_bg = QHBoxLayout()
-        row_bg.setSpacing(5)
-        row_bg.addWidget(QLabel("外扩背景:"))
+        row_bg.setSpacing(6)
+        row_bg.addWidget(_field_lbl("外扩背景"))
         self.bg_btn_group = QButtonGroup(self)
         self.btn_bg_blur = ChipButton("高斯模糊")
         self.btn_bg_white = ChipButton("纯白")
@@ -468,108 +531,106 @@ class MainWindow(QMainWindow):
         self.btn_bg_pick = ChipButton("🎨 取色")
         self.btn_bg_blur.setChecked(True)
         for b in (self.btn_bg_blur, self.btn_bg_white, self.btn_bg_black, self.btn_bg_pick):
+            b.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             self.bg_btn_group.addButton(b)
-            row_bg.addWidget(b)
+            row_bg.addWidget(b, 1)
         self.btn_bg_blur.clicked.connect(self._on_bg_blur_selected)
         self.btn_bg_white.clicked.connect(lambda: self._set_bg_color("#FFFFFF", self.btn_bg_white))
         self.btn_bg_black.clicked.connect(lambda: self._set_bg_color("#000000", self.btn_bg_black))
         self.btn_bg_pick.clicked.connect(self._pick_bg_color)
+        c1_lay.addLayout(row_bg)
 
+        self.blur_row_widget = QWidget()
+        br_lay = QHBoxLayout(self.blur_row_widget)
+        br_lay.setContentsMargins(0, 0, 0, 0)
+        br_lay.setSpacing(8)
+        br_lay.addWidget(_field_lbl("模糊强度"))
         self.slider_blur = NoWheelSlider(Qt.Orientation.Horizontal)
         self.slider_blur.setRange(8, 80)
         self.slider_blur.setValue(35)
         self.slider_blur.valueChanged.connect(self._on_bg_changed)
-        row_bg.addWidget(self.slider_blur, 1)
-        c1_lay.addLayout(row_bg)
-        cards_lay.addWidget(c1)
+        br_lay.addWidget(self.slider_blur, 1)
+        self.lbl_blur_val = QLabel("35")
+        self.lbl_blur_val.setFixedWidth(28)
+        br_lay.addWidget(self.lbl_blur_val)
+        c1_lay.addWidget(self.blur_row_widget)
+        cards_lay.addWidget(self.c1)
 
-        # ---- CARD 02: FPS Control, RIFE 30fps default, GPU Acceleration, X秒Y帧 & 3s Key-Trim ----
-        c2, c2_lay = _make_section_card("02", "帧率控制与 AI 光流补帧 (类 DLSS / 小黄鸭)")
-        row_fps_modes = QHBoxLayout()
-        row_fps_modes.setSpacing(6)
-        self.fps_btn_group = QButtonGroup(self)
-        self.rb_keep = OptionPillButton("保持原帧率")
-        self.rb_retime = OptionPillButton("原始帧重排")
-        self.rb_rife = OptionPillButton("AI 光流补帧")
-        self.rb_keep.setChecked(True)
-        for rb in (self.rb_keep, self.rb_retime, self.rb_rife):
-            self.fps_btn_group.addButton(rb)
-            rb.toggled.connect(self._on_fps_mode_changed)
-            row_fps_modes.addWidget(rb, 1)
-        c2_lay.addLayout(row_fps_modes)
+        # ---- CARD 02: FPS Control, RIFE 30fps default, GPU, X秒Y帧 & 3s Key-Trim ----
+        self.c2, c2_lay = _make_section_card("02", "帧率控制与 AI 光流补帧 (类 DLSS / 小黄鸭)")
+        self.seg_fps_mode = SegmentedBar(
+            [("保持原帧率", "keep_original"), ("原始帧重排", "raw_retime"), ("AI 光流补帧", "rife_interpolate")]
+        )
+        self.seg_fps_mode.selectionChanged.connect(lambda _k: self._on_fps_mode_changed())
+        c2_lay.addWidget(self.seg_fps_mode)
 
         self.rife_panel = QWidget()
-        rife_lay = QVBoxLayout(self.rife_panel)
-        rife_lay.setContentsMargins(0, 2, 0, 0)
-        rife_lay.setSpacing(5)
+        rife_grid = QGridLayout(self.rife_panel)
+        rife_grid.setContentsMargins(0, 2, 0, 0)
+        rife_grid.setSpacing(6)
 
-        rife_row1 = QHBoxLayout()
-        rife_row1.setSpacing(5)
-        rife_row1.addWidget(QLabel("补帧模式:"))
+        rife_grid.addWidget(_field_lbl("补帧模式"), 0, 0)
         self.combo_rife_mode = NoWheelComboBox()
         self.combo_rife_mode.addItem("补帧至目标帧率 (保持原时长，默认30帧)", ("target_fps", 1))
         self.combo_rife_mode.addItem("2x 倍率补帧", ("multiplier", 2))
         self.combo_rife_mode.addItem("3x 倍率补帧", ("multiplier", 3))
         self.combo_rife_mode.addItem("4x 倍率补帧", ("multiplier", 4))
         self.combo_rife_mode.currentIndexChanged.connect(self._on_fps_mode_changed)
-        rife_row1.addWidget(self.combo_rife_mode, 1)
+        rife_grid.addWidget(self.combo_rife_mode, 0, 1)
+
         self.btn_dl_rife = QPushButton("⬇ 下载 RIFE")
         self.btn_dl_rife.setVisible(find_rife() is None)
         self.btn_dl_rife.clicked.connect(self._on_download_rife)
-        rife_row1.addWidget(self.btn_dl_rife)
-        rife_lay.addLayout(rife_row1)
+        rife_grid.addWidget(self.btn_dl_rife, 0, 2)
 
-        rife_row2 = QHBoxLayout()
-        rife_row2.setSpacing(5)
-        rife_row2.addWidget(QLabel("模型:"))
+        rife_grid.addWidget(_field_lbl("AI 模型"), 1, 0)
         self.combo_rife_model = NoWheelComboBox()
         self._populate_rife_models()
-        rife_row2.addWidget(self.combo_rife_model, 1)
-        rife_row2.addWidget(QLabel("加速:"))
+        rife_grid.addWidget(self.combo_rife_model, 1, 1, 1, 2)
+
+        rife_grid.addWidget(_field_lbl("硬件加速"), 2, 0)
         self.combo_rife_gpu = NoWheelComboBox()
         self._populate_rife_gpus()
-        rife_row2.addWidget(self.combo_rife_gpu, 1)
-        rife_lay.addLayout(rife_row2)
+        rife_grid.addWidget(self.combo_rife_gpu, 2, 1, 1, 2)
 
-        self.rife_policy_row = QWidget()
-        rp_lay = QHBoxLayout(self.rife_policy_row)
-        rp_lay.setContentsMargins(0, 0, 0, 0)
-        rp_lay.addWidget(QLabel("倍率后播放:"))
+        self.lbl_rife_policy = _field_lbl("倍率播放")
         self.combo_rife_policy = NoWheelComboBox()
         self.combo_rife_policy.addItem("保持原时长 (自动倍增帧率)", "keep_duration")
         self.combo_rife_policy.addItem("自定义播放帧率 (慢放)", "custom_fps")
         self.combo_rife_policy.currentIndexChanged.connect(self._on_fps_mode_changed)
-        rp_lay.addWidget(self.combo_rife_policy, 1)
-        rife_lay.addWidget(self.rife_policy_row)
+        rife_grid.addWidget(self.lbl_rife_policy, 3, 0)
+        rife_grid.addWidget(self.combo_rife_policy, 3, 1, 1, 2)
         c2_lay.addWidget(self.rife_panel)
 
         self.custom_fps_panel = QWidget()
         cf_lay = QHBoxLayout(self.custom_fps_panel)
         cf_lay.setContentsMargins(0, 2, 0, 0)
         cf_lay.setSpacing(5)
-        cf_lay.addWidget(QLabel("目标帧率:"))
+        cf_lay.addWidget(_field_lbl("目标帧率"))
         self.spin_custom_fps = NoWheelDoubleSpinBox()
         self.spin_custom_fps.setRange(1.0, 240.0)
         self.spin_custom_fps.setDecimals(0)
         self.spin_custom_fps.setValue(30.0)
         self.spin_custom_fps.setSuffix(" 帧/秒")
+        self.spin_custom_fps.setFixedWidth(104)
         self.spin_custom_fps.valueChanged.connect(self._on_custom_fps_changed)
         cf_lay.addWidget(self.spin_custom_fps)
         for preset_fps in FPS_PRESET_VALUES:
             btn = QPushButton(f"{preset_fps}")
             btn.setObjectName("fpsChipBtn")
             btn.setCheckable(True)
-            btn.setMinimumWidth(46)
+            btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             btn.clicked.connect(lambda _=False, v=preset_fps: self.spin_custom_fps.setValue(float(v)))
-            cf_lay.addWidget(btn)
+            cf_lay.addWidget(btn, 1)
             self._fps_chip_buttons.append((preset_fps, btn))
         c2_lay.addWidget(self.custom_fps_panel)
 
         sum_row = QHBoxLayout()
+        sum_row.setSpacing(6)
         self.lbl_summary = QLabel("请先导入视频")
         self.lbl_summary.setWordWrap(True)
         self.lbl_summary.setStyleSheet(
-            f"background-color: {PALETTE['mint_soft']}; border: 1px solid {PALETTE['sky']}; border-radius: 8px; padding: 6px 10px; color: {PALETTE['ink_primary']};"
+            f"background-color: {PALETTE['mint_soft']}; border: 1px solid {PALETTE['sky']}; border-radius: 8px; padding: 7px 10px; color: {PALETTE['ink_primary']};"
         )
         sum_row.addWidget(self.lbl_summary, 1)
         self.btn_fit_3s = QPushButton("✂ 控时3秒")
@@ -578,77 +639,85 @@ class MainWindow(QMainWindow):
         self.btn_fit_3s.clicked.connect(self._fit_duration_under_3s)
         sum_row.addWidget(self.btn_fit_3s)
         c2_lay.addLayout(sum_row)
-        cards_lay.addWidget(c2)
+        cards_lay.addWidget(self.c2)
 
-        # ---- CARD 03: Key Photo & External Cover Aspect Mismatch Handling ----
-        c3, c3_lay = _make_section_card("03", "实况封面 (主要图片)")
+        # ---- CARD 03: Key Photo & External Cover Aspect Handling ----
+        self.c3, c3_lay = _make_section_card("03", "实况封面 (主要图片)")
+        self.seg_key_source = SegmentedBar(
+            [("使用视频选定帧", "video_frame"), ("使用外部自定义图片", "external_image")]
+        )
+        self.seg_key_source.selectionChanged.connect(lambda _k: self._on_key_source_changed())
+        c3_lay.addWidget(self.seg_key_source)
+
         c3_body = QHBoxLayout()
-        c3_body.setSpacing(8)
+        c3_body.setSpacing(10)
         key_left = QVBoxLayout()
-        key_left.setSpacing(5)
-        key_mode_row = QHBoxLayout()
-        self.key_btn_group = QButtonGroup(self)
-        self.rb_key_video = OptionPillButton("使用视频选定帧")
-        self.rb_key_ext = OptionPillButton("使用外部自定义图片")
-        self.rb_key_video.setChecked(True)
-        self.key_btn_group.addButton(self.rb_key_video)
-        self.key_btn_group.addButton(self.rb_key_ext)
-        self.rb_key_video.toggled.connect(self._on_key_source_changed)
-        key_mode_row.addWidget(self.rb_key_video, 1)
-        key_mode_row.addWidget(self.rb_key_ext, 1)
-        key_left.addLayout(key_mode_row)
+        key_left.setSpacing(7)
 
         row_kf = QHBoxLayout()
-        row_kf.addWidget(QLabel("封面帧:"))
+        row_kf.setSpacing(6)
+        row_kf.addWidget(_field_lbl("封面帧号"))
         self.spin_key_frame = NoWheelSpinBox()
+        self.spin_key_frame.setFixedWidth(76)
         self.spin_key_frame.valueChanged.connect(self._on_key_frame_changed)
         row_kf.addWidget(self.spin_key_frame)
         self.btn_take_cur_key = QPushButton("取当前帧")
         self.btn_take_cur_key.clicked.connect(self._set_current_as_key)
         row_kf.addWidget(self.btn_take_cur_key)
+        self.btn_jump_key = QPushButton("跳至封面")
+        self.btn_jump_key.clicked.connect(lambda: self._seek_frame(self.spin_key_frame.value()))
+        row_kf.addWidget(self.btn_jump_key)
+        row_kf.addStretch(1)
+        key_left.addLayout(row_kf)
+
+        row_ext = QHBoxLayout()
+        row_ext.setSpacing(6)
+        row_ext.addWidget(_field_lbl("外部图片"))
         self.btn_choose_ext = QPushButton("选图片...")
         self.btn_choose_ext.clicked.connect(self._on_choose_external_key)
-        row_kf.addWidget(self.btn_choose_ext)
-        self.lbl_ext_name = QLabel("未选")
+        row_ext.addWidget(self.btn_choose_ext)
+        self.lbl_ext_name = ElidedLabel("未选择外部图片", Qt.TextElideMode.ElideMiddle)
         self.lbl_ext_name.setStyleSheet(f"color: {PALETTE['ink_muted']};")
-        row_kf.addWidget(self.lbl_ext_name, 1)
-        key_left.addLayout(row_kf)
+        row_ext.addWidget(self.lbl_ext_name, 1)
+        key_left.addLayout(row_ext)
 
         self.ext_aspect_panel = QWidget()
         ea_lay = QHBoxLayout(self.ext_aspect_panel)
-        ea_lay.setContentsMargins(0, 2, 0, 0)
-        ea_lay.setSpacing(4)
-        ea_lay.addWidget(QLabel("比例不同:"))
+        ea_lay.setContentsMargins(0, 0, 0, 0)
+        ea_lay.setSpacing(5)
+        ea_lay.addWidget(_field_lbl("比例不同"))
         self.ext_aspect_group = QButtonGroup(self)
-        self.btn_ext_crop = ChipButton("居中裁切封面")
-        self.btn_ext_pad = ChipButton("留边保留全图")
-        self.btn_ext_match = ChipButton("视频随封面比例")
+        self.btn_ext_crop = ChipButton("居中裁切")
+        self.btn_ext_pad = ChipButton("留边全图")
+        self.btn_ext_match = ChipButton("随封面比例")
         self.btn_ext_crop.setChecked(True)
         for b, mode_val in (
             (self.btn_ext_crop, "crop_fill"),
             (self.btn_ext_pad, "pad_fit"),
             (self.btn_ext_match, "match_cover_aspect"),
         ):
+            b.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             self.ext_aspect_group.addButton(b)
             b.clicked.connect(lambda _=False, m=mode_val: self._on_ext_aspect_mode_clicked(m))
             ea_lay.addWidget(b, 1)
         key_left.addWidget(self.ext_aspect_panel)
 
         self.lbl_key_thumb = QLabel("封面")
-        self.lbl_key_thumb.setFixedSize(68, 74)
+        self.lbl_key_thumb.setFixedSize(92, 112)
         self.lbl_key_thumb.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.lbl_key_thumb.setStyleSheet(
-            f"background-color: {PALETTE['surface_subtle']}; border: 1px solid {PALETTE['sky']}; border-radius: 7px;"
+            f"background-color: {PALETTE['surface_subtle']}; border: 1px solid {PALETTE['sky']}; border-radius: 8px;"
         )
         c3_body.addLayout(key_left, 1)
         c3_body.addWidget(self.lbl_key_thumb)
         c3_lay.addLayout(c3_body)
-        cards_lay.addWidget(c3)
+        cards_lay.addWidget(self.c3)
 
-        # ---- CARD 04: Long-Edge Buttons, Bitrate + Size Estimate, EXIF Import/Edit, USB DCIM ----
-        c4, c4_lay = _make_section_card("04", "导出设置、码率预估、EXIF 与 U 盘直导")
+        # ---- CARD 04: Export, Long Edge, Bitrate, EXIF, USB DCIM ----
+        self.c4, c4_lay = _make_section_card("04", "导出设置、码率预估、EXIF 与 U 盘直导")
         row_fmt = QHBoxLayout()
-        row_fmt.addWidget(QLabel("格式:"))
+        row_fmt.setSpacing(8)
+        row_fmt.addWidget(_field_lbl("实况格式"))
         self.combo_img_fmt = NoWheelComboBox()
         self.combo_img_fmt.addItem("HEIC + MOV (iPhone 原生推荐)", "heic")
         self.combo_img_fmt.addItem("JPG + MOV (兼容旧工具)", "jpg")
@@ -656,75 +725,87 @@ class MainWindow(QMainWindow):
         row_fmt.addWidget(self.combo_img_fmt, 1)
         c4_lay.addLayout(row_fmt)
 
-        row_edge = QHBoxLayout()
-        row_edge.setSpacing(4)
-        row_edge.addWidget(QLabel("视频长边:"))
+        row_edge1 = QHBoxLayout()
+        row_edge1.setSpacing(5)
+        row_edge1.addWidget(_field_lbl("视频长边"))
         self.long_edge_group = QButtonGroup(self)
         for val in LONG_EDGE_PRESETS:
             txt = "原尺寸" if val == 0 else str(val)
             eb = ChipButton(txt)
+            eb.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             self.long_edge_group.addButton(eb)
             eb.clicked.connect(lambda _=False, v=val: self._on_long_edge_preset_clicked(v))
-            row_edge.addWidget(eb)
+            row_edge1.addWidget(eb, 1)
             self._long_edge_buttons[val] = eb
         self._long_edge_buttons[0].setChecked(True)
+        c4_lay.addLayout(row_edge1)
+
+        row_edge2 = QHBoxLayout()
+        row_edge2.setSpacing(6)
+        row_edge2.addWidget(_field_lbl("自定义px"))
         self.spin_custom_edge = NoWheelSpinBox()
         self.spin_custom_edge.setRange(0, 8192)
         self.spin_custom_edge.setSingleStep(2)
         self.spin_custom_edge.setSpecialValueText("原尺寸")
         self.spin_custom_edge.setSuffix(" px")
-        self.spin_custom_edge.setFixedWidth(96)
+        self.spin_custom_edge.setFixedWidth(112)
         self.spin_custom_edge.valueChanged.connect(self._on_custom_edge_changed)
-        row_edge.addWidget(self.spin_custom_edge)
-        c4_lay.addLayout(row_edge)
+        row_edge2.addWidget(self.spin_custom_edge)
+        lbl_edge_hint = QLabel("(0 = 保持源尺寸不缩放)")
+        lbl_edge_hint.setStyleSheet(f"color: {PALETTE['ink_muted']};")
+        row_edge2.addWidget(lbl_edge_hint, 1)
+        c4_lay.addLayout(row_edge2)
 
         row_br = QHBoxLayout()
         row_br.setSpacing(6)
-        row_br.addWidget(QLabel("输出码率:"))
+        row_br.addWidget(_field_lbl("输出码率"))
         self.slider_bitrate = NoWheelSlider(Qt.Orientation.Horizontal)
         self.slider_bitrate.setRange(4, 80)
         self.slider_bitrate.setValue(24)
         self.slider_bitrate.valueChanged.connect(self._on_bitrate_changed)
         row_br.addWidget(self.slider_bitrate, 1)
         self.lbl_bitrate_val = QLabel("24 Mbps")
+        self.lbl_bitrate_val.setFixedWidth(64)
+        self.lbl_bitrate_val.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.lbl_bitrate_val.setStyleSheet("font-weight: bold;")
         row_br.addWidget(self.lbl_bitrate_val)
-        self.lbl_est_size = QLabel("预计: -")
-        self.lbl_est_size.setObjectName("metaCapsule")
-        row_br.addWidget(self.lbl_est_size)
         c4_lay.addLayout(row_br)
 
+        self.lbl_est_size = ElidedLabel("预计输出体积: -", Qt.TextElideMode.ElideRight)
+        self.lbl_est_size.setObjectName("metaCapsule")
+        c4_lay.addWidget(self.lbl_est_size)
+
         row_exif = QHBoxLayout()
-        row_exif.setSpacing(5)
-        row_exif.addWidget(QLabel("EXIF:"))
-        self.lbl_exif_summary = QLabel("默认 Apple 实况信息")
+        row_exif.setSpacing(6)
+        row_exif.addWidget(_field_lbl("相机 EXIF"))
+        self.lbl_exif_summary = ElidedLabel("默认 Apple 实况信息", Qt.TextElideMode.ElideRight)
         self.lbl_exif_summary.setObjectName("metaCapsule")
         row_exif.addWidget(self.lbl_exif_summary, 1)
-        self.btn_edit_exif = QPushButton("📷 修改 / 导入 EXIF...")
-        self.btn_edit_exif.clicked.connect(self._on_open_exif_dialog)
-        self.btn_auto_exif = QPushButton("🪄 同名RAW")
-        self.btn_auto_exif.clicked.connect(self._on_quick_auto_exif)
-        row_exif.addWidget(self.btn_edit_exif)
-        row_exif.addWidget(self.btn_auto_exif)
         c4_lay.addLayout(row_exif)
 
-        row_exp_mode = QHBoxLayout()
-        self.export_btn_group = QButtonGroup(self)
-        self.rb_export_usb = OptionPillButton("U盘相机结构 (DCIM/100APPLE)")
-        self.rb_export_folder = OptionPillButton("普通文件夹 (JPG/HEIC+MOV)")
-        self.rb_export_usb.setChecked(True)
-        self.export_btn_group.addButton(self.rb_export_usb)
-        self.export_btn_group.addButton(self.rb_export_folder)
-        self.rb_export_usb.toggled.connect(self._on_export_mode_changed)
-        row_exp_mode.addWidget(self.rb_export_usb, 1)
-        row_exp_mode.addWidget(self.rb_export_folder, 1)
-        c4_lay.addLayout(row_exp_mode)
+        row_exif_btns = QHBoxLayout()
+        row_exif_btns.setSpacing(6)
+        self.btn_edit_exif = QPushButton("📷 修改 / 导入 EXIF...")
+        self.btn_edit_exif.setToolTip("支持读取 .CR3 / .CR2 / .NEF / .ARW / .DNG / .JPG / .HEIC 相机 EXIF")
+        self.btn_edit_exif.clicked.connect(self._on_open_exif_dialog)
+        self.btn_auto_exif = QPushButton("🪄 匹配同名RAW")
+        self.btn_auto_exif.clicked.connect(self._on_quick_auto_exif)
+        row_exif_btns.addWidget(self.btn_edit_exif, 1)
+        row_exif_btns.addWidget(self.btn_auto_exif)
+        c4_lay.addLayout(row_exif_btns)
+
+        self.seg_export_mode = SegmentedBar(
+            [("U盘相机 (DCIM)", "usb_dcim"), ("普通文件夹", "folder")]
+        )
+        self.seg_export_mode.selectionChanged.connect(lambda _k: self._on_export_mode_changed())
+        c4_lay.addWidget(self.seg_export_mode)
 
         self.usb_panel = QWidget()
         usb_lay = QVBoxLayout(self.usb_panel)
         usb_lay.setContentsMargins(0, 2, 0, 0)
-        usb_lay.setSpacing(4)
+        usb_lay.setSpacing(6)
         row_drv = QHBoxLayout()
+        row_drv.setSpacing(6)
         self.combo_usb = NoWheelComboBox()
         self.combo_usb.currentIndexChanged.connect(self._update_export_preview)
         self.btn_refresh_usb = QPushButton("刷新U盘")
@@ -737,9 +818,10 @@ class MainWindow(QMainWindow):
         usb_lay.addLayout(row_drv)
 
         row_dcf = QHBoxLayout()
-        row_dcf.addWidget(QLabel("相机编号:"))
+        row_dcf.setSpacing(5)
+        row_dcf.addWidget(_field_lbl("相机编号"))
         self.edit_dcf_prefix = QLineEdit("IMG_")
-        self.edit_dcf_prefix.setFixedWidth(58)
+        self.edit_dcf_prefix.setFixedWidth(56)
         self.edit_dcf_prefix.setMaxLength(4)
         self.edit_dcf_prefix.setValidator(QRegularExpressionValidator(r"[A-Za-z0-9_]{1,4}"))
         self.edit_dcf_prefix.textChanged.connect(self._on_dcf_changed)
@@ -748,20 +830,21 @@ class MainWindow(QMainWindow):
         self.spin_dcf = FourDigitSpinBox()
         self.spin_dcf.setRange(1, 9999)
         self.spin_dcf.setValue(7607)
+        self.spin_dcf.setFixedWidth(74)
         self.spin_dcf.valueChanged.connect(self._on_dcf_changed)
         row_dcf.addWidget(self.spin_dcf)
 
-        self.btn_dcf_from_file = QPushButton("取文件名号")
+        self.btn_dcf_from_file = QPushButton("取文件名")
         self.btn_dcf_from_file.clicked.connect(self._reset_dcf_from_filename)
         row_dcf.addWidget(self.btn_dcf_from_file)
 
-        self.chk_dcf_auto_inc = StyledCheckBox("导出后自动+1")
+        self.chk_dcf_auto_inc = StyledCheckBox("自动+1")
         self.chk_dcf_auto_inc.setChecked(True)
         self.chk_dcf_auto_inc.toggled.connect(self._save_dcf_settings)
-        row_dcf.addWidget(self.chk_dcf_auto_inc)
+        row_dcf.addWidget(self.chk_dcf_auto_inc, 1)
         usb_lay.addLayout(row_dcf)
 
-        self.lbl_usb_dest_preview = QLabel("")
+        self.lbl_usb_dest_preview = ElidedLabel("", Qt.TextElideMode.ElideMiddle)
         self.lbl_usb_dest_preview.setStyleSheet(f"color: {PALETTE['ink_secondary']};")
         usb_lay.addWidget(self.lbl_usb_dest_preview)
         c4_lay.addWidget(self.usb_panel)
@@ -769,6 +852,7 @@ class MainWindow(QMainWindow):
         self.folder_panel = QWidget()
         fol_lay = QHBoxLayout(self.folder_panel)
         fol_lay.setContentsMargins(0, 2, 0, 0)
+        fol_lay.setSpacing(6)
         self.edit_folder = QLineEdit(str(Path.home() / "Desktop" / "LivePhoto_Output"))
         self.btn_browse_folder = QPushButton("浏览...")
         self.btn_browse_folder.clicked.connect(self._browse_output_folder)
@@ -784,10 +868,29 @@ class MainWindow(QMainWindow):
         self.chk_hw_encode.setChecked(self._nvenc_available)
         self.chk_hw_encode.setEnabled(self._nvenc_available)
         c4_lay.addWidget(self.chk_hw_encode)
-        cards_lay.addWidget(c4)
+        cards_lay.addWidget(self.c4)
         cards_lay.addStretch(1)
 
-        # Pinned Export Footer
+        # ---- ALWAYS-VISIBLE LIVE SUMMARY OVERVIEW STRIP ----
+        summary_bar = QFrame()
+        summary_bar.setObjectName("liveSummaryBar")
+        sb_grid = QGridLayout(summary_bar)
+        sb_grid.setContentsMargins(8, 6, 8, 6)
+        sb_grid.setSpacing(5)
+        self.pill_sum_canvas = QPushButton("📐 画布: -")
+        self.pill_sum_fps = QPushButton("⚡ 帧率: -")
+        self.pill_sum_cover = QPushButton("★ 封面: -")
+        self.pill_sum_export = QPushButton("📦 体积: -")
+        for idx, pill in enumerate(
+            (self.pill_sum_canvas, self.pill_sum_fps, self.pill_sum_cover, self.pill_sum_export)
+        ):
+            pill.setObjectName("summaryPillBtn")
+            pill.setCursor(Qt.CursorShape.PointingHandCursor)
+            pill.clicked.connect(lambda _=False, s=idx: self._set_active_step(s))
+            sb_grid.addWidget(pill, idx // 2, idx % 2)
+        right_col_lay.addWidget(summary_bar)
+
+        # ---- PINNED EXPORT FOOTER ----
         footer = QFrame()
         footer.setObjectName("exportFooter")
         f_lay = QVBoxLayout(footer)
@@ -795,11 +898,12 @@ class MainWindow(QMainWindow):
         f_lay.setSpacing(6)
 
         row_act = QHBoxLayout()
+        row_act.setSpacing(6)
         self.btn_convert = QPushButton("✦ 开始生成实况照片")
         self.btn_convert.setObjectName("primaryBtn")
         self.btn_convert.setEnabled(False)
         self.btn_convert.clicked.connect(self._on_start_convert)
-        self.btn_convert_all = QPushButton("✦ 批量生成全部")
+        self.btn_convert_all = QPushButton("✦ 批量生成")
         self.btn_convert_all.setObjectName("keyStarBtn")
         self.btn_convert_all.setVisible(False)
         self.btn_convert_all.clicked.connect(self._on_start_batch_convert)
@@ -819,18 +923,80 @@ class MainWindow(QMainWindow):
         self.progress_bar.setValue(0)
         f_lay.addWidget(self.progress_bar)
 
-        self.lbl_status = QLabel("就绪 · U盘插 iPhone 后打开「照片」App → 右下角「导入」即可合成实况")
+        self.lbl_status = ElidedLabel(
+            "就绪 · U盘插 iPhone 后打开「照片」App → 右下角「导入」即可合成实况",
+            Qt.TextElideMode.ElideRight,
+        )
         self.lbl_status.setStyleSheet(f"color: {PALETTE['ink_secondary']};")
         f_lay.addWidget(self.lbl_status)
 
         right_col_lay.addWidget(footer)
-        body.addWidget(right_col)
+        self.main_splitter.addWidget(right_col)
+        self.main_splitter.setStretchFactor(0, 1)
+        self.main_splitter.setStretchFactor(1, 0)
+        self.main_splitter.setSizes([920, 580])
 
+        self._sync_inspector_step_visibility()
         self._on_bg_changed()
         self._on_fps_mode_changed()
         self._on_key_source_changed()
         self._on_export_mode_changed()
         self._on_custom_fps_changed(self.spin_custom_fps.value())
+
+    # ---------- Stepper & Compatibility Properties ----------
+
+    def _set_active_step(self, idx: int) -> None:
+        self._active_step = max(0, min(3, idx))
+        self._nav_step_buttons[self._active_step].setChecked(True)
+        self._sync_inspector_step_visibility()
+
+    def _sync_inspector_step_visibility(self) -> None:
+        expand_all = self.btn_expand_all.isChecked()
+        cards = (self.c1, self.c2, self.c3, self.c4)
+        for idx, card in enumerate(cards):
+            card.setVisible(expand_all or idx == self._active_step)
+
+    @property
+    def rb_keep(self) -> QPushButton:
+        b = self.seg_fps_mode.buttonForKey("keep_original")
+        assert b is not None
+        return b
+
+    @property
+    def rb_retime(self) -> QPushButton:
+        b = self.seg_fps_mode.buttonForKey("raw_retime")
+        assert b is not None
+        return b
+
+    @property
+    def rb_rife(self) -> QPushButton:
+        b = self.seg_fps_mode.buttonForKey("rife_interpolate")
+        assert b is not None
+        return b
+
+    @property
+    def rb_key_video(self) -> QPushButton:
+        b = self.seg_key_source.buttonForKey("video_frame")
+        assert b is not None
+        return b
+
+    @property
+    def rb_key_ext(self) -> QPushButton:
+        b = self.seg_key_source.buttonForKey("external_image")
+        assert b is not None
+        return b
+
+    @property
+    def rb_export_usb(self) -> QPushButton:
+        b = self.seg_export_mode.buttonForKey("usb_dcim")
+        assert b is not None
+        return b
+
+    @property
+    def rb_export_folder(self) -> QPushButton:
+        b = self.seg_export_mode.buttonForKey("folder")
+        assert b is not None
+        return b
 
     # ---------- Queue & Video Loading ----------
 
@@ -874,21 +1040,11 @@ class MainWindow(QMainWindow):
         st.padding = self.preview.get_padding()
         st.polaroid_preset = self._active_polaroid
         st.aspect_key = self._active_aspect_key
-        if self.btn_audio_mute.isChecked():
-            st.audio_mode = "mute"
-        elif self.btn_audio_fade.isChecked():
-            st.audio_mode = "trim_fade"
-        else:
-            st.audio_mode = "speed_sync"
+        st.audio_mode = str(self.seg_audio.currentKey() or "speed_sync")
         st.bg_mode = "blur" if self.btn_bg_blur.isChecked() else "solid"
         st.bg_color = self._bg_color_hex
         st.bg_blur_sigma = self.slider_blur.value()
-        if self.rb_keep.isChecked():
-            st.fps_mode = "keep_original"
-        elif self.rb_retime.isChecked():
-            st.fps_mode = "raw_retime"
-        else:
-            st.fps_mode = "rife_interpolate"
+        st.fps_mode = str(self.seg_fps_mode.currentKey() or "keep_original")
         rm_data = self.combo_rife_mode.currentData() or ("target_fps", 1)
         st.rife_mode = rm_data[0]
         st.rife_multiplier = int(rm_data[1])
@@ -896,7 +1052,7 @@ class MainWindow(QMainWindow):
         st.rife_gpu_id = int(self.combo_rife_gpu.currentData() if self.combo_rife_gpu.currentData() is not None else 0)
         st.rife_playback_policy = str(self.combo_rife_policy.currentData() or "keep_duration")
         st.custom_fps = self.spin_custom_fps.value()
-        st.key_source = "video_frame" if self.rb_key_video.isChecked() else "external_image"
+        st.key_source = str(self.seg_key_source.currentKey() or "video_frame")
         st.key_frame_index = self.spin_key_frame.value()
         st.external_key_path = self._external_key_path
         st.external_key_aspect_mode = self._selected_ext_aspect_mode()
@@ -938,12 +1094,7 @@ class MainWindow(QMainWindow):
             for k, pb in self._polaroid_buttons.items():
                 pb.setChecked(k == st.polaroid_preset)
 
-            if st.audio_mode == "mute":
-                self.btn_audio_mute.setChecked(True)
-            elif st.audio_mode == "trim_fade":
-                self.btn_audio_fade.setChecked(True)
-            else:
-                self.btn_audio_sync.setChecked(True)
+            self.seg_audio.setCurrentKey(st.audio_mode)
 
             self._bg_color_hex = st.bg_color
             self.slider_blur.setValue(st.bg_blur_sigma)
@@ -956,18 +1107,13 @@ class MainWindow(QMainWindow):
             else:
                 self.btn_bg_pick.setChecked(True)
 
-            if st.fps_mode == "raw_retime":
-                self.rb_retime.setChecked(True)
-            elif st.fps_mode in ("rife_interpolate", "ffmpeg_minterpolate"):
-                self.rb_rife.setChecked(True)
-            else:
-                self.rb_keep.setChecked(True)
+            fps_key = "rife_interpolate" if st.fps_mode == "ffmpeg_minterpolate" else st.fps_mode
+            self.seg_fps_mode.setCurrentKey(fps_key)
             self.spin_custom_fps.setValue(st.custom_fps)
 
             self._external_key_path = st.external_key_path
-            self.lbl_ext_name.setText(st.external_key_path.name if st.external_key_path else "未选")
-            self.rb_key_video.setChecked(st.key_source == "video_frame")
-            self.rb_key_ext.setChecked(st.key_source == "external_image")
+            self.lbl_ext_name.setText(st.external_key_path.name if st.external_key_path else "未选择外部图片")
+            self.seg_key_source.setCurrentKey(st.key_source)
 
             self.spin_custom_edge.setValue(st.video_max_edge)
             for val, eb in self._long_edge_buttons.items():
@@ -1007,7 +1153,7 @@ class MainWindow(QMainWindow):
                 w.deleteLater()
 
         count = len(self._queue)
-        self.queue_bar.setVisible(count >= 1)
+        self.queue_bar.setVisible(count > 1)
         self.lbl_queue_title.setText(f"队列 ({count}):")
         self.btn_convert_all.setVisible(count > 1)
         self.btn_queue_sync.setVisible(count > 1)
@@ -1181,7 +1327,7 @@ class MainWindow(QMainWindow):
         cur_txt = format_sec_frames(out_sec, summary.output_fps)
         tot_txt = format_frames_as_sec_frames(summary.output_frames, summary.output_fps)
         self.lbl_playhead.setText(
-            f"当前: 第 {self._current_frame} 帧  |  当前设定下时刻: {cur_txt} / {tot_txt}"
+            f"当前: 第 {self._current_frame} 帧  |  设定时刻: {cur_txt} / {tot_txt}"
         )
 
     def _effective_preview_fps(self) -> float:
@@ -1236,7 +1382,7 @@ class MainWindow(QMainWindow):
     def _set_current_as_key(self) -> None:
         if self._video_info is None:
             return
-        self.rb_key_video.setChecked(True)
+        self.seg_key_source.setCurrentKey("video_frame")
         clamped = max(self.spin_start.value(), min(self._current_frame, self.spin_end.value()))
         self.spin_key_frame.setValue(clamped)
 
@@ -1272,12 +1418,12 @@ class MainWindow(QMainWindow):
     # ---------- Card 01: Crop, Polaroid, Flat Background ----------
 
     def _on_crop_toggle_changed(self, checked: bool) -> None:
-        self.btn_crop_toggle.setText("✓ 完成裁切" if checked else "✂ 裁切画面")
+        self.btn_crop_toggle.setText("✓ 完成裁切" if checked else "✂ 裁切构图")
         self.preview.set_crop_editing(checked)
 
     def _on_zoom_changed(self, zoom: float) -> None:
         pct = int(round(zoom * 100))
-        self.btn_zoom_reset.setText(f"{pct}% 重置视图")
+        self.btn_zoom_reset.setText(f"{pct}% 适应")
 
     def _refresh_canvas_res_label(self) -> None:
         if self._video_info is None:
@@ -1293,6 +1439,7 @@ class MainWindow(QMainWindow):
         else:
             tag = ""
         self.lbl_crop_res.setText(f"画布: {tw}×{th}{tag}")
+        self.pill_sum_canvas.setText(f"📐 {tw}×{th}{tag}")
 
     def _on_crop_changed(self, crop: CropRect) -> None:
         if self._video_info is None:
@@ -1310,7 +1457,7 @@ class MainWindow(QMainWindow):
     def _on_aspect_button_clicked(self, key: str) -> None:
         self._active_aspect_key = key
         self._clear_polaroid_selection()
-        fit_mode = "pad" if self.btn_fit_pad.isChecked() else "inside"
+        fit_mode = str(self.seg_fit_mode.currentKey() or "inside")
         self._reapply_current_aspect(fit_mode)
 
     def _reapply_current_aspect(self, fit_mode: str) -> None:
@@ -1350,7 +1497,7 @@ class MainWindow(QMainWindow):
             if ratio <= 0:
                 return
         self._clear_polaroid_selection()
-        fit_mode = "pad" if self.btn_fit_pad.isChecked() else "inside"
+        fit_mode = str(self.seg_fit_mode.currentKey() or "inside")
         if not self.btn_crop_toggle.isChecked():
             self.btn_crop_toggle.setChecked(True)
         self.preview.apply_aspect_fit(ratio, mode=fit_mode)
@@ -1370,7 +1517,6 @@ class MainWindow(QMainWindow):
             self._video_info.height,
             current_crop=self.preview.get_crop(),
         )
-        # Default instant film border to pure white if blur was active
         if self.btn_bg_blur.isChecked():
             self._set_bg_color("#FFFFFF", self.btn_bg_white)
         self.preview.set_padding(pad)
@@ -1405,7 +1551,8 @@ class MainWindow(QMainWindow):
 
     def _on_bg_changed(self) -> None:
         is_blur = self.btn_bg_blur.isChecked()
-        self.slider_blur.setVisible(is_blur)
+        self.blur_row_widget.setVisible(is_blur)
+        self.lbl_blur_val.setText(str(self.slider_blur.value()))
         self.preview.set_background_style(
             "blur" if is_blur else "solid",
             self._bg_color_hex,
@@ -1456,13 +1603,15 @@ class MainWindow(QMainWindow):
         self.combo_rife_gpu.addItem("CPU 软件回退", -1)
 
     def _on_fps_mode_changed(self) -> None:
-        is_retime = self.rb_retime.isChecked()
-        is_rife = self.rb_rife.isChecked()
+        mode = str(self.seg_fps_mode.currentKey() or "keep_original")
+        is_retime = mode == "raw_retime"
+        is_rife = mode == "rife_interpolate"
         self.rife_panel.setVisible(is_rife)
 
         rm_data = self.combo_rife_mode.currentData() or ("target_fps", 1)
         is_mult = is_rife and rm_data[0] == "multiplier"
-        self.rife_policy_row.setVisible(is_mult)
+        self.lbl_rife_policy.setVisible(is_mult)
+        self.combo_rife_policy.setVisible(is_mult)
 
         show_custom_fps = is_retime or (is_rife and not is_mult) or (is_mult and self.combo_rife_policy.currentData() == "custom_fps")
         self.custom_fps_panel.setVisible(show_custom_fps)
@@ -1474,7 +1623,6 @@ class MainWindow(QMainWindow):
         self._update_summary()
 
     def _fit_duration_under_3s(self) -> None:
-        """Trim [start_frame, end_frame] to 3s around Key Photo WITHOUT altering FPS."""
         if self._video_info is None:
             return
         job = self._build_job()
@@ -1533,9 +1681,10 @@ class MainWindow(QMainWindow):
         self._update_summary()
 
     def _on_key_source_changed(self) -> None:
-        is_video = self.rb_key_video.isChecked()
+        is_video = self.seg_key_source.currentKey() == "video_frame"
         self.spin_key_frame.setEnabled(is_video)
         self.btn_take_cur_key.setEnabled(is_video)
+        self.btn_jump_key.setEnabled(is_video)
         self.btn_choose_ext.setEnabled(not is_video)
         self.ext_aspect_panel.setVisible(not is_video)
         self.timeline.set_key_frame(self.spin_key_frame.value(), is_video)
@@ -1563,17 +1712,17 @@ class MainWindow(QMainWindow):
         if path_str:
             self._external_key_path = Path(path_str)
             self.lbl_ext_name.setText(self._external_key_path.name)
-            self.rb_key_ext.setChecked(True)
-            self._refresh_key_thumbnail()
+            self.seg_key_source.setCurrentKey("external_image")
+            self._on_key_source_changed()
             if self.btn_ext_match.isChecked():
                 self._on_ext_aspect_mode_clicked("match_cover_aspect")
 
     def _refresh_key_thumbnail(self) -> None:
-        if self.rb_key_ext.isChecked() and self._external_key_path and self._external_key_path.is_file():
+        if not self.rb_key_video.isChecked() and self._external_key_path and self._external_key_path.is_file():
             pix = QPixmap(str(self._external_key_path))
             if not pix.isNull():
                 self.lbl_key_thumb.setPixmap(
-                    pix.scaled(64, 70, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+                    pix.scaled(86, 106, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
                 )
                 return
         if self._video_info is not None:
@@ -1581,7 +1730,7 @@ class MainWindow(QMainWindow):
             if qimg is not None:
                 pix = QPixmap.fromImage(qimg)
                 self.lbl_key_thumb.setPixmap(
-                    pix.scaled(64, 70, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+                    pix.scaled(86, 106, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
                 )
                 return
         self.lbl_key_thumb.setText("封面")
@@ -1642,7 +1791,7 @@ class MainWindow(QMainWindow):
         self.lbl_status.setText(f"已匹配导入 EXIF: {match.name}")
 
     def _on_export_mode_changed(self) -> None:
-        is_usb = self.rb_export_usb.isChecked()
+        is_usb = self.seg_export_mode.currentKey() == "usb_dcim"
         self.usb_panel.setVisible(is_usb)
         self.folder_panel.setVisible(not is_usb)
         self._update_export_preview()
@@ -1703,33 +1852,33 @@ class MainWindow(QMainWindow):
             ext = "HEIC" if self.combo_img_fmt.currentData() == "heic" else "JPG"
             if not root:
                 self.lbl_usb_dest_preview.setText("目标路径: 请先插入 U盘 或点击「自选目录」")
-                self.lbl_usb_dest_preview.setToolTip("")
             else:
                 full = str(Path(root) / "DCIM" / "100APPLE" / f"{pfx}{num:04d}.{ext}")
                 self.lbl_usb_dest_preview.setText(f"目标路径: {full}")
-                self.lbl_usb_dest_preview.setToolTip(full)
 
     # ---------- Job Builder & Summary ----------
 
     def _build_job(self) -> ConversionJob:
         assert self._video_info is not None
-        if self.rb_keep.isChecked():
-            fps_mode = "keep_original"
-        elif self.rb_retime.isChecked():
-            fps_mode = "raw_retime"
-        else:
+        fps_key = str(self.seg_fps_mode.currentKey() or "keep_original")
+        if fps_key == "rife_interpolate":
             model_val = self.combo_rife_model.currentData()
             fps_mode = (
                 "ffmpeg_minterpolate"
                 if (model_val == "ffmpeg_minterpolate" or find_rife() is None)
                 else "rife_interpolate"
             )
+        else:
+            fps_mode = fps_key
 
         rm_data = self.combo_rife_mode.currentData() or ("target_fps", 1)
         rife_mode = rm_data[0]
         rife_mult = int(rm_data[1])
 
-        audio_retime_mode = "trim_fade" if self.btn_audio_fade.isChecked() else "speed_sync"
+        audio_key = str(self.seg_audio.currentKey() or "speed_sync")
+        is_mute = audio_key == "mute"
+        audio_retime_mode = "trim_fade" if audio_key == "trim_fade" else "speed_sync"
+
         is_usb = self.rb_export_usb.isChecked()
         usb_data = str(self.combo_usb.currentData() or "")
         out_root = Path(usb_data) if is_usb else Path(self.edit_folder.text().strip())
@@ -1741,7 +1890,7 @@ class MainWindow(QMainWindow):
             crop=self.preview.get_crop(),
             padding=self.preview.get_padding(),
             polaroid_preset=self._active_polaroid,
-            mute=self.btn_audio_mute.isChecked(),
+            mute=is_mute,
             fps_mode=fps_mode,  # type: ignore[arg-type]
             custom_fps=self.spin_custom_fps.value(),
             rife_mode=rife_mode,  # type: ignore[arg-type]
@@ -1813,12 +1962,15 @@ class MainWindow(QMainWindow):
 
     def _update_size_estimate(self) -> None:
         if self._video_info is None:
-            self.lbl_est_size.setText("预计: -")
+            self.lbl_est_size.setText("预计输出体积: -")
+            self.pill_sum_export.setText("📦 体积: -")
             return
         job = self._build_job()
         summary = compute_timeline_summary(self._video_info, job)
         img_mb, mov_mb, tot_mb = estimate_output_size_mb(self._video_info, job, summary)
-        self.lbl_est_size.setText(f"预计 ~{tot_mb:.1f} MB (图 {img_mb:.1f} + 影 {mov_mb:.1f})")
+        fmt_tag = "HEIC" if job.image_format == "heic" else "JPG"
+        self.lbl_est_size.setText(f"预计输出体积: ~{tot_mb:.1f} MB  (封面 {img_mb:.1f} MB + 视频 {mov_mb:.1f} MB)")
+        self.pill_sum_export.setText(f"📦 {fmt_tag} · ~{tot_mb:.1f} MB")
 
     def _update_summary(self) -> None:
         if self._video_info is None:
@@ -1853,12 +2005,19 @@ class MainWindow(QMainWindow):
         fps_int = int(round(s.output_fps))
 
         self.lbl_summary.setStyleSheet(
-            f"background-color: {bg}; border: 1px solid {bd}; border-radius: 8px; padding: 6px 10px; color: {fg};"
+            f"background-color: {bg}; border: 1px solid {bd}; border-radius: 8px; padding: 7px 10px; color: {fg};"
         )
         self.lbl_summary.setText(
             f"截取: {s.selected_frames} 帧 ({in_dur_txt})  ➔  输出: {s.output_frames} 帧 @ {fps_int} 帧/秒\n"
             f"实况时长: {out_dur_txt}  |  封面锚点: {cover_txt}{note}"
         )
+
+        self.pill_sum_fps.setText(f"⚡ {fps_int}帧 · {out_dur_txt}")
+        if self.rb_key_video.isChecked():
+            self.pill_sum_cover.setText(f"★ 第{self.spin_key_frame.value()}帧 ({cover_txt})")
+        else:
+            name = self._external_key_path.name if self._external_key_path else "外部图"
+            self.pill_sum_cover.setText(f"★ 外部: {name[:10]}")
 
     # ---------- Context Menu & Shortcuts ----------
 

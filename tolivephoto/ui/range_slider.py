@@ -1,4 +1,4 @@
-"""Dual-handle range timeline slider with X秒Y帧 labels (zero decimal points)."""
+"""Dual-handle range timeline slider with X秒Y帧 labels, hover indicator, and clickable ★ key pill."""
 from __future__ import annotations
 
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
@@ -11,6 +11,7 @@ from ..core.models import format_frames_as_sec_frames, format_sec_frames
 class RangeTimelineSlider(QWidget):
     rangeChanged = Signal(int, int)
     currentFrameChanged = Signal(int)
+    keyPillClicked = Signal()
 
     _NONE = 0
     _START = 1
@@ -19,7 +20,7 @@ class RangeTimelineSlider(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setFixedHeight(66)
+        self.setFixedHeight(68)
         self.setMouseTracking(True)
         self._total = 1
         self._start = 0
@@ -32,6 +33,8 @@ class RangeTimelineSlider(QWidget):
         self._output_fps = 24.0
         self._output_frames = 0
         self._drag_target = self._NONE
+        self._hover_x: float | None = None
+        self._hover_handle: int = self._NONE
 
     def configure(self, total_frames: int, start: int, end: int, current: int, key_frame: int) -> None:
         self._total = max(1, total_frames)
@@ -64,7 +67,7 @@ class RangeTimelineSlider(QWidget):
         self.update()
 
     def _track_rect(self) -> QRectF:
-        return QRectF(20, 23, max(20, self.width() - 40), 10)
+        return QRectF(20, 24, max(20, self.width() - 40), 10)
 
     def _frame_to_x(self, frame: int) -> float:
         tr = self._track_rect()
@@ -78,6 +81,10 @@ class RangeTimelineSlider(QWidget):
             return 0
         ratio = max(0.0, min(1.0, (x - tr.left()) / tr.width()))
         return int(round(ratio * (self._total - 1)))
+
+    def _key_pill_rect(self) -> QRectF:
+        kx = self._frame_to_x(self._key_frame)
+        return QRectF(max(0.0, min(self.width() - 88, kx - 44)), 1, 88, 19)
 
     def paintEvent(self, event) -> None:  # type: ignore[override]
         p = QPainter(self)
@@ -120,9 +127,8 @@ class RangeTimelineSlider(QWidget):
         )
 
         if self._show_key_star:
-            kx = self._frame_to_x(self._key_frame)
+            pill = self._key_pill_rect()
             star_txt = f"★{format_sec_frames(self._cover_still_time, self._output_fps)}"
-            pill = QRectF(max(0.0, min(self.width() - 88, kx - 44)), 1, 88, 18)
             p.setPen(QPen(QColor("#DF9FE8"), 1))
             p.setBrush(QColor("#FADCFE"))
             p.drawRoundedRect(pill, 6, 6)
@@ -156,11 +162,32 @@ class RangeTimelineSlider(QWidget):
                     last_label_x = tx
                 sec_tick += sec_step
 
+        # Hover hairline + frame badge
+        if self._hover_x is not None and self._drag_target == self._NONE and tr.left() <= self._hover_x <= tr.right():
+            hf = self._x_to_frame(self._hover_x)
+            p.setPen(QPen(QColor(125, 133, 204, 150), 1.2, Qt.PenStyle.DashLine))
+            p.drawLine(QPointF(self._hover_x, tr.top() - 4), QPointF(self._hover_x, tr.bottom() + 4))
+            tip_rect = QRectF(
+                max(4.0, min(self.width() - 62.0, self._hover_x - 29.0)),
+                tr.bottom() + 10,
+                58,
+                17,
+            )
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(37, 41, 58, 200))
+            p.drawRoundedRect(tip_rect, 4, 4)
+            p.setPen(QColor("#FEFDF9"))
+            p.drawText(tip_rect, Qt.AlignmentFlag.AlignCenter, f"第{hf}帧")
+
         # Start & End handles (#7D85CC)
-        p.setPen(QPen(QColor("#FEFDF9"), 1.5))
-        p.setBrush(QColor("#7D85CC"))
-        p.drawRoundedRect(QRectF(sx - 5, tr.top() - 4, 10, tr.height() + 8), 4, 4)
-        p.drawRoundedRect(QRectF(ex - 5, tr.top() - 4, 10, tr.height() + 8), 4, 4)
+        for is_start, hx in ((True, sx), (False, ex)):
+            hovered = (is_start and self._hover_handle == self._START) or (
+                not is_start and self._hover_handle == self._END
+            )
+            hw = 12.0 if hovered else 10.0
+            p.setPen(QPen(QColor("#FEFDF9"), 1.5))
+            p.setBrush(QColor("#6B74BE") if hovered else QColor("#7D85CC"))
+            p.drawRoundedRect(QRectF(hx - hw / 2.0, tr.top() - 4, hw, tr.height() + 8), 4, 4)
 
         # Playhead cursor
         cx = self._frame_to_x(self._current)
@@ -170,7 +197,12 @@ class RangeTimelineSlider(QWidget):
     def mousePressEvent(self, event: QMouseEvent) -> None:
         if event.button() != Qt.MouseButton.LeftButton:
             return
-        x = event.position().x()
+        pos = event.position()
+        if self._show_key_star and self._key_pill_rect().contains(pos):
+            self.keyPillClicked.emit()
+            return
+
+        x = pos.x()
         sx = self._frame_to_x(self._start)
         ex = self._frame_to_x(self._end)
         if abs(x - sx) <= 10:
@@ -185,9 +217,27 @@ class RangeTimelineSlider(QWidget):
             self.update()
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        pos = event.position()
+        self._hover_x = pos.x()
         if self._drag_target == self._NONE:
+            sx = self._frame_to_x(self._start)
+            ex = self._frame_to_x(self._end)
+            if abs(pos.x() - sx) <= 10:
+                self._hover_handle = self._START
+                self.setCursor(Qt.CursorShape.SizeHorCursor)
+            elif abs(pos.x() - ex) <= 10:
+                self._hover_handle = self._END
+                self.setCursor(Qt.CursorShape.SizeHorCursor)
+            elif self._show_key_star and self._key_pill_rect().contains(pos):
+                self._hover_handle = self._NONE
+                self.setCursor(Qt.CursorShape.PointingHandCursor)
+            else:
+                self._hover_handle = self._NONE
+                self.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.update()
             return
-        f = self._x_to_frame(event.position().x())
+
+        f = self._x_to_frame(pos.x())
         if self._drag_target == self._START:
             self._start = min(f, self._end)
             self._current = self._start
@@ -205,3 +255,10 @@ class RangeTimelineSlider(QWidget):
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
         self._drag_target = self._NONE
+        self.update()
+
+    def leaveEvent(self, event) -> None:  # type: ignore[override]
+        self._hover_x = None
+        self._hover_handle = self._NONE
+        self.update()
+        super().leaveEvent(event)
