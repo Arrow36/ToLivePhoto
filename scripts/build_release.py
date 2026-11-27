@@ -27,6 +27,9 @@ BTBN_SHARED_URL = (
 def _ensure_ffmpeg_bin(bin_ffmpeg: Path) -> None:
     ffmpeg_exe = bin_ffmpeg / "ffmpeg.exe"
     ffprobe_exe = bin_ffmpeg / "ffprobe.exe"
+    ffplay_exe = bin_ffmpeg / "ffplay.exe"
+    if ffplay_exe.exists():
+        ffplay_exe.unlink(missing_ok=True)
     if ffmpeg_exe.is_file() and ffprobe_exe.is_file():
         print(f"FFmpeg already present in {bin_ffmpeg}")
         return
@@ -45,6 +48,8 @@ def _ensure_ffmpeg_bin(bin_ffmpeg: Path) -> None:
                 if "/bin/" not in norm or norm.endswith("/"):
                     continue
                 fname = Path(norm).name
+                if fname.lower() == "ffplay.exe":
+                    continue
                 if fname.lower().endswith((".exe", ".dll")):
                     with zf.open(member) as src, (bin_ffmpeg / fname).open("wb") as dst:
                         shutil.copyfileobj(src, dst)
@@ -96,6 +101,33 @@ def _sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
+def _prune_unused_files(internal_dir: Path) -> None:
+    """Remove unused heavy runtime files without affecting any app feature."""
+    file_globs = (
+        "cv2/opencv_videoio_ffmpeg*.dll",
+        "PySide6/opengl32sw.dll",
+        "PySide6/plugins/imageformats/qpdf.dll",
+        "PySide6/Qt6Pdf*.dll",
+        "PySide6/Qt6Quick*.dll",
+        "PySide6/Qt6Qml*.dll",
+        "PySide6/Qt6VirtualKeyboard*.dll",
+        "PIL/_avif*.pyd",
+    )
+    removed_bytes = 0
+    for pat in file_globs:
+        for f in internal_dir.glob(pat):
+            if f.is_file():
+                removed_bytes += f.stat().st_size
+                f.unlink(missing_ok=True)
+
+    for dir_rel in ("PySide6/translations", "PySide6/qml"):
+        d = internal_dir / dir_rel
+        if d.is_dir():
+            removed_bytes += sum(p.stat().st_size for p in d.rglob("*") if p.is_file())
+            shutil.rmtree(d, ignore_errors=True)
+    print(f"Pruned unused runtime bloat: {removed_bytes / (1024 * 1024):.2f} MB")
+
+
 def main() -> int:
     bin_rife = ROOT_DIR / "bin" / "rife"
     bin_ffmpeg = ROOT_DIR / "bin" / "ffmpeg"
@@ -104,9 +136,11 @@ def main() -> int:
 
     dist_root = ROOT_DIR / "dist"
     build_root = ROOT_DIR / "build"
+    stage_dist_root = build_root / "dist_stage"
+    app_stage = stage_dist_root / "ToLivePhoto"
     app_dist = dist_root / "ToLivePhoto"
-    if app_dist.exists():
-        shutil.rmtree(app_dist)
+    if app_stage.exists():
+        shutil.rmtree(app_stage)
 
     cmd = [
         sys.executable,
@@ -121,7 +155,7 @@ def main() -> int:
         "--specpath",
         str(build_root),
         "--distpath",
-        str(dist_root),
+        str(stage_dist_root),
         "--workpath",
         str(build_root / "work"),
         "--name",
@@ -130,10 +164,6 @@ def main() -> int:
         str(ROOT_DIR / "tolivephoto" / "assets" / "icons" / "app_icon.ico"),
         "--add-data",
         f"{ROOT_DIR / 'tolivephoto' / 'assets'};tolivephoto/assets",
-        "--add-data",
-        f"{bin_ffmpeg};bin/ffmpeg",
-        "--add-data",
-        f"{bin_rife};bin/rife",
         "--hidden-import=_pillow_heif",
         "--collect-all=pillow_heif",
     ]
@@ -162,11 +192,24 @@ def main() -> int:
     print("Running PyInstaller...")
     subprocess.run(cmd, cwd=str(ROOT_DIR), check=True)
 
-    exe_path = app_dist / "ToLivePhoto.exe"
+    exe_path = app_stage / "ToLivePhoto.exe"
     if not exe_path.is_file():
         raise FileNotFoundError(f"Expected EXE not created: {exe_path}")
 
-    shutil.copy2(ROOT_DIR / "README.md", app_dist / "使用说明_README.md")
+    internal_dir = app_stage / "_internal"
+    # Copy external CLI binaries AFTER PyInstaller so PyInstaller never duplicates FFmpeg DLLs
+    dst_ffmpeg = internal_dir / "bin" / "ffmpeg"
+    dst_ffmpeg.mkdir(parents=True, exist_ok=True)
+    for f in bin_ffmpeg.iterdir():
+        if f.is_file() and f.name.lower() != "ffplay.exe":
+            shutil.copy2(f, dst_ffmpeg / f.name)
+
+    dst_rife = internal_dir / "bin" / "rife"
+    shutil.copytree(bin_rife, dst_rife, dirs_exist_ok=True)
+
+    _prune_unused_files(internal_dir)
+
+    shutil.copy2(ROOT_DIR / "README.md", app_stage / "使用说明_README.md")
 
     # Self-test frozen executable with stripped PATH
     report_path = build_root / "selftest_report.txt"
@@ -177,7 +220,7 @@ def main() -> int:
     print("Running frozen ToLivePhoto.exe --selftest with isolated PATH...")
     subprocess.run(
         [str(exe_path), "--selftest", str(report_path)],
-        cwd=str(app_dist),
+        cwd=str(app_stage),
         env=clean_env,
         check=True,
     )
@@ -188,15 +231,24 @@ def main() -> int:
     if "_internal\\bin\\ffmpeg" not in report_text or "_internal\\bin\\rife" not in report_text:
         raise RuntimeError(f"Bundled binaries were not resolved from _internal/bin:\n{report_text}")
 
+    dist_root.mkdir(parents=True, exist_ok=True)
     zip_path = dist_root / f"ToLivePhoto-v{VERSION}-Windows-x64.zip"
     if zip_path.exists():
         zip_path.unlink()
     print(f"Creating {zip_path} ...")
-    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
-        for file_path in sorted(app_dist.rglob("*")):
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as zf:
+        for file_path in sorted(app_stage.rglob("*")):
             if file_path.is_file():
-                arcname = Path("ToLivePhoto") / file_path.relative_to(app_dist)
+                arcname = Path("ToLivePhoto") / file_path.relative_to(app_stage)
                 zf.write(file_path, arcname.as_posix())
+
+    # Update dist/ToLivePhoto if not locked by a running instance
+    try:
+        if app_dist.exists():
+            shutil.rmtree(app_dist)
+        shutil.copytree(app_stage, app_dist)
+    except PermissionError as exc:
+        print(f"Note: skipped refreshing {app_dist} because it is currently in use ({exc}).")
 
     size_mb = zip_path.stat().st_size / (1024 * 1024)
     digest = _sha256_file(zip_path)

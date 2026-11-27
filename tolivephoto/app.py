@@ -18,6 +18,8 @@ from tolivephoto.ui.theme import ensure_bytedance_font
 
 def _run_selftest(report_path: Path | None) -> int:
     os.environ["QT_QPA_PLATFORM"] = "offscreen"
+    import cv2
+    import numpy as np
     from PIL import Image
 
     from tolivephoto.core.apple_live import inspect_live_image, write_live_image
@@ -34,6 +36,10 @@ def _run_selftest(report_path: Path | None) -> int:
     app.processEvents()
     win.close()
     app.processEvents()
+
+    arr = np.zeros((32, 32, 3), dtype=np.uint8)
+    blurred = cv2.GaussianBlur(cv2.resize(arr, (64, 64)), (0, 0), sigmaX=2.0)
+    assert blurred.shape == (64, 64, 3)
 
     with tempfile.TemporaryDirectory() as td:
         heic_path = Path(td) / "selftest.HEIC"
