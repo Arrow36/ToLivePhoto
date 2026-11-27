@@ -136,6 +136,7 @@ def _prepare_cover_image(
     crop: CropRect,
     padding: FramePadding,
     temp_dir: Path,
+    cancel_cb: CancelCallback | None = None,
 ) -> Path:
     raw_cover = temp_dir / "cover_raw.png"
     ffmpeg = find_ffmpeg()
@@ -158,7 +159,8 @@ def _prepare_cover_image(
                 "-frames:v",
                 "1",
                 str(full_png),
-            ]
+            ],
+            cancel_cb=cancel_cb,
         )
         if not full_png.is_file():
             raise RuntimeError(f"无法从视频提取第 {frame_idx} 帧作为主图。")
@@ -222,6 +224,7 @@ def _encode_audio_track(
     info: VideoInfo,
     summary: TimelineSummary,
     temp_dir: Path,
+    cancel_cb: CancelCallback | None = None,
 ) -> Path | None:
     if job.mute or not info.has_audio:
         return None
@@ -268,7 +271,7 @@ def _encode_audio_track(
         "2",
         str(audio_out),
     ]
-    run_command(cmd)
+    run_command(cmd, cancel_cb=cancel_cb)
     return audio_out if audio_out.is_file() else None
 
 
@@ -456,7 +459,8 @@ def _render_intermediate_mov(
                 "-pix_fmt",
                 "yuvj420p",
                 str(in_frames / "%08d.jpg"),
-            ]
+            ],
+            cancel_cb=cancel_cb,
         )
 
         if cancel_cb and cancel_cb():
@@ -490,7 +494,7 @@ def _render_intermediate_mov(
         else:
             cmd += ["-map", "0:v:0", "-an"]
         cmd += vcodec + [str(inter_mov)]
-        run_command(cmd)
+        run_command(cmd, cancel_cb=cancel_cb)
         return inter_mov
 
     if progress_cb:
@@ -539,9 +543,11 @@ def _render_intermediate_mov(
         cmd += ["-fps_mode", "cfr", "-r", f"{summary.output_fps:.6f}"]
     elif job.fps_mode == "keep_original":
         cmd += ["-fps_mode", "passthrough"]
+    elif job.fps_mode == "ffmpeg_minterpolate":
+        cmd += ["-threads", "0"]
 
     cmd += vcodec + [str(inter_mov)]
-    run_command(cmd)
+    run_command(cmd, cancel_cb=cancel_cb)
     return inter_mov
 
 
@@ -568,7 +574,7 @@ def run_conversion(
 
         if progress_cb:
             progress_cb(5, "正在提取并生成主要图片 (封面)...")
-        raw_cover = _prepare_cover_image(job, info, crop, padding, temp_dir)
+        raw_cover = _prepare_cover_image(job, info, crop, padding, temp_dir, cancel_cb=cancel_cb)
         staged_img = temp_dir / f"live_cover.{ext}"
         write_live_image(
             raw_cover,
@@ -580,7 +586,7 @@ def run_conversion(
 
         if progress_cb:
             progress_cb(10, "正在处理音轨..." if not job.mute and info.has_audio else "静音模式：跳过音轨...")
-        audio_path = _encode_audio_track(job, info, summary, temp_dir)
+        audio_path = _encode_audio_track(job, info, summary, temp_dir, cancel_cb=cancel_cb)
 
         inter_mov = _render_intermediate_mov(
             job, info, crop, padding, summary, audio_path, temp_dir, progress_cb, cancel_cb

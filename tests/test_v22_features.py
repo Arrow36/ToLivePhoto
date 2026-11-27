@@ -182,3 +182,53 @@ def test_custom_app_icon_assets_and_qicon() -> None:
     _app = QApplication.instance() or QApplication([])
     icon = create_app_icon()
     assert not icon.pixmap(64, 64).isNull()
+
+
+def test_cancellable_run_command_kills_subprocess_immediately() -> None:
+    import sys
+    import time
+    import pytest
+    from tolivephoto.core.tools import ConversionCancelled, run_command
+
+    t0 = time.monotonic()
+    with pytest.raises(ConversionCancelled):
+        run_command(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            cancel_cb=lambda: (time.monotonic() - t0) >= 0.15,
+        )
+    elapsed = time.monotonic() - t0
+    assert elapsed < 3.0
+
+
+def test_rife_v425_high_res_threads_no_black_frames(tmp_path: Path) -> None:
+    import cv2
+    import numpy as np
+    import pytest
+    from tolivephoto.core.interpolator import interpolate_frames_rife
+    from tolivephoto.core.tools import find_rife
+
+    if find_rife() is None:
+        pytest.skip("RIFE not installed")
+
+    inp = tmp_path / "in"
+    out = tmp_path / "out"
+    inp.mkdir()
+    img = np.full((2996, 2508, 3), 130, dtype=np.uint8)
+    for i in range(1, 5):
+        cv2.imwrite(str(inp / f"{i:08d}.jpg"), img)
+
+    interpolate_frames_rife(
+        input_dir=inp,
+        output_dir=out,
+        target_frames=8,
+        model_name="rife-v4.25",
+        width=2508,
+        height=2996,
+        gpu_id=0,
+        frame_ext="jpg",
+    )
+    produced = sorted(out.glob("*.jpg"))
+    assert len(produced) == 8
+    for p in produced:
+        frame = cv2.imread(str(p))
+        assert frame is not None and float(frame.mean()) >= 5.0

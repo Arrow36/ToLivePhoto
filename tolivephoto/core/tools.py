@@ -6,8 +6,11 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
+import time
 from functools import cache
 from pathlib import Path
+from typing import Any, Callable
 
 if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
     BUNDLE_ROOT = Path(getattr(sys, "_MEIPASS"))
@@ -153,22 +156,81 @@ def has_nvenc() -> bool:
     return proc.returncode == 0
 
 
+class ConversionCancelled(RuntimeError):
+    pass
+
+
+def kill_process_tree(proc: subprocess.Popen[Any]) -> None:
+    """Forcefully terminate a subprocess and all of its child processes."""
+    if proc.poll() is not None:
+        return
+    if sys.platform == "win32":
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                capture_output=True,
+                creationflags=_creation_flags(),
+                timeout=5,
+            )
+        except Exception:
+            pass
+    try:
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait(timeout=3)
+    except Exception:
+        pass
+
+
 def run_command(
     cmd: list[str],
     cwd: Path | None = None,
     check: bool = True,
+    cancel_cb: Callable[[], bool] | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    proc = subprocess.run(
-        cmd,
-        cwd=str(cwd) if cwd else None,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        creationflags=_creation_flags(),
-    )
-    if check and proc.returncode != 0:
-        raise RuntimeError(
-            f"命令执行失败 (exit={proc.returncode}): {' '.join(cmd)}\n{proc.stderr.strip()}"
+    if cancel_cb is None:
+        proc = subprocess.run(
+            cmd,
+            cwd=str(cwd) if cwd else None,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            creationflags=_creation_flags(),
         )
-    return proc
+        if check and proc.returncode != 0:
+            raise RuntimeError(
+                f"命令执行失败 (exit={proc.returncode}): {' '.join(cmd)}\n{proc.stderr.strip()}"
+            )
+        return proc
+
+    with (
+        tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace") as out_f,
+        tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace") as err_f,
+    ):
+        popen = subprocess.Popen(
+            cmd,
+            cwd=str(cwd) if cwd else None,
+            stdout=out_f,
+            stderr=err_f,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            creationflags=_creation_flags(),
+        )
+        while popen.poll() is None:
+            if cancel_cb():
+                kill_process_tree(popen)
+                raise ConversionCancelled("用户已取消转换")
+            time.sleep(0.08)
+
+        out_f.seek(0)
+        err_f.seek(0)
+        stdout = out_f.read()
+        stderr = err_f.read()
+        res = subprocess.CompletedProcess(cmd, popen.returncode, stdout=stdout, stderr=stderr)
+        if check and popen.returncode != 0:
+            raise RuntimeError(
+                f"命令执行失败 (exit={popen.returncode}): {' '.join(cmd)}\n{stderr.strip()}"
+            )
+        return res

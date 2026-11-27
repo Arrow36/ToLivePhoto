@@ -2688,10 +2688,29 @@ class MainWindow(QMainWindow):
             return False
         return True
 
+    def _check_rife_available_for_jobs(self, jobs: list[ConversionJob]) -> bool:
+        need_rife = any(
+            j.fps_mode == "ffmpeg_minterpolate"
+            and str(self.seg_fps_mode.currentKey() or "") == "rife_interpolate"
+            and j.rife_model != "ffmpeg_minterpolate"
+            for j in jobs
+        )
+        if need_rife and find_rife() is None:
+            QMessageBox.warning(
+                self,
+                "未检测到 RIFE 光流补帧引擎",
+                "当前已选择「AI 光流补帧」，但未检测到 bin/rife/rife-ncnn-vulkan.exe。\n\n"
+                "请先点击右侧「一键下载 RIFE」安装补帧引擎，或切换到「保持原帧率 / 原始帧重排」。",
+            )
+            return False
+        return True
+
     def _on_start_convert(self) -> None:
         if self._video_info is None or not self._validate_export_target():
             return
         job = self._build_job()
+        if not self._check_rife_available_for_jobs([job]):
+            return
         self.btn_convert.setEnabled(False)
         self.btn_convert_all.setEnabled(False)
         self.btn_cancel.setEnabled(True)
@@ -2712,6 +2731,8 @@ class MainWindow(QMainWindow):
             return
         self._capture_active_state()
         jobs = [self._build_job_for_state(st) for st in self._queue]
+        if not self._check_rife_available_for_jobs(jobs):
+            return
 
         self.btn_convert.setEnabled(False)
         self.btn_convert_all.setEnabled(False)
