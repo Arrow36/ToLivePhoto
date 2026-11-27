@@ -1,6 +1,7 @@
 """Application entry point for ToLivePhoto (supports windowless pythonw launch)."""
 from __future__ import annotations
 
+import ctypes
 import os
 import sys
 from pathlib import Path
@@ -17,6 +18,12 @@ def main() -> int:
         sys.stdout = open(os.devnull, "w", encoding="utf-8")
     if sys.stderr is None:
         sys.stderr = open(os.devnull, "w", encoding="utf-8")
+
+    if os.name == "nt":
+        try:
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Arrow36.ToLivePhoto.Studio")
+        except Exception:
+            pass
 
     app = QApplication(sys.argv)
     app.setStyle("Fusion")

@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="tolivephoto/assets/icons/app_icon.png" width="108" alt="ToLivePhoto Icon">
+</p>
+
 # ToLivePhoto
 
 Windows 原生桌面工具，将任意视频一键转换为 **iPhone 原生可识别、U盘直导合成** 的 **Live Photo（实况照片）**。

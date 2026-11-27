@@ -162,3 +162,23 @@ def test_dcim_default_2live_and_modern_naming(tmp_path: Path) -> None:
     assert stem == "CSI_7607_2live"
     assert img_p == dcim_dir / "CSI_7607_2live.HEIC"
     assert mov_p == dcim_dir / "CSI_7607_2live.MOV"
+
+
+def test_custom_app_icon_assets_and_qicon() -> None:
+    import os
+    from PySide6.QtWidgets import QApplication
+    from tolivephoto.ui.icon import ICON_ICO_PATH, ICON_PNG_PATH, create_app_icon
+
+    assert ICON_PNG_PATH.is_file() and ICON_PNG_PATH.stat().st_size > 10_000
+    assert ICON_ICO_PATH.is_file() and ICON_ICO_PATH.stat().st_size > 5_000
+
+    with Image.open(ICON_PNG_PATH) as im:
+        assert im.size == (512, 512)
+        assert im.mode == "RGBA"
+        assert im.getpixel((0, 0))[3] == 0
+        assert im.getpixel((256, 256))[3] == 255
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    _app = QApplication.instance() or QApplication([])
+    icon = create_app_icon()
+    assert not icon.pixmap(64, 64).isNull()
