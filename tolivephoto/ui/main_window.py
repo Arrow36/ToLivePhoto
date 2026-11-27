@@ -40,6 +40,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .. import __version__
 from ..core.exif_io import (
     SIDECAR_EXIF_EXTENSIONS,
     ExifMetadata,
@@ -234,7 +235,7 @@ class MainWindow(QMainWindow):
         font_family = ensure_bytedance_font(app)
         scale = compute_dpi_font_scale(app)
 
-        self.setWindowTitle("ToLivePhoto — 视频转 iPhone 实况照片工作台")
+        self.setWindowTitle(f"ToLivePhoto v{__version__} — 视频转 iPhone 实况照片工作台")
         self.setWindowIcon(create_app_icon())
         self.resize(1540, 940)
         self.setAcceptDrops(True)

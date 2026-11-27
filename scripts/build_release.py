@@ -14,10 +14,9 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
+from tolivephoto import __version__ as VERSION
 from tolivephoto.core.rife_setup import install_rife
 from tolivephoto.core.tools import find_ffmpeg, find_ffprobe
-
-VERSION = "2.5.0"
 BTBN_SHARED_URL = (
     "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/"
     "ffmpeg-master-latest-win64-gpl-shared.zip"

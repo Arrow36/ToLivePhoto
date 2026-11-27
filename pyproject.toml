@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ToLivePhoto"
-version = "2.5.0"
+version = "2.6.0"
 description = "Windows native desktop studio for converting videos to iPhone Live Photos with RIFE optical-flow interpolation, out-of-bounds canvas padding, and USB DCIM export"
 authors = [{ name = "Arrow36" }]
 requires-python = ">=3.11"

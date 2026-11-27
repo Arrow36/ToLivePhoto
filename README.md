@@ -30,7 +30,7 @@ Windows 原生桌面工具，将任意视频一键转换为 **iPhone 原生可�
 
 ### 方式一：开箱即用独立版（推荐，无需安装 Python / FFmpeg）
 
-1. 前往本仓库右侧 [**Releases**](https://github.com/Arrow36/ToLivePhoto/releases) 下载最新 `ToLivePhoto-v2.5.0-Windows-x64.zip`；
+1. 前往本仓库右侧 [**Releases**](https://github.com/Arrow36/ToLivePhoto/releases) 下载最新 `ToLivePhoto-v2.6.0-Windows-x64.zip`；
 2. 解压后双击文件夹内的 **`ToLivePhoto.exe`** 即可直接运行（已内置 FFmpeg、RIFE GPU 补帧引擎与模型、字体及全部运行库）。
 
 ### 方式二：从源码运行
@@ -55,7 +55,7 @@ pip install pyinstaller
 python scripts/build_release.py
 ```
 
-打包产物位于 `dist/ToLivePhoto/ToLivePhoto.exe` 与 `dist/ToLivePhoto-v2.5.0-Windows-x64.zip`。
+打包产物位于 `dist/ToLivePhoto/ToLivePhoto.exe` 与 `dist/ToLivePhoto-v2.6.0-Windows-x64.zip`。
 
 ## 测试
 
