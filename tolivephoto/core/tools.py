@@ -9,8 +9,15 @@ import sys
 from functools import cache
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-BIN_DIR = PROJECT_ROOT / "bin"
+if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+    BUNDLE_ROOT = Path(getattr(sys, "_MEIPASS"))
+    APP_DIR = Path(sys.executable).resolve().parent
+else:
+    BUNDLE_ROOT = Path(__file__).resolve().parent.parent.parent
+    APP_DIR = BUNDLE_ROOT
+
+PROJECT_ROOT = BUNDLE_ROOT
+BIN_DIR = BUNDLE_ROOT / "bin"
 
 
 def _creation_flags() -> int:
@@ -34,9 +41,10 @@ def _find_winget_ffmpeg(exe_name: str) -> Path | None:
 
 
 def find_ffmpeg() -> Path:
-    local_bin = BIN_DIR / "ffmpeg" / "ffmpeg.exe"
-    if local_bin.is_file():
-        return local_bin
+    for base in (APP_DIR, BUNDLE_ROOT):
+        local_bin = base / "bin" / "ffmpeg" / "ffmpeg.exe"
+        if local_bin.is_file():
+            return local_bin
     on_path = shutil.which("ffmpeg")
     if on_path:
         return Path(on_path)
@@ -47,9 +55,10 @@ def find_ffmpeg() -> Path:
 
 
 def find_ffprobe() -> Path:
-    local_bin = BIN_DIR / "ffmpeg" / "ffprobe.exe"
-    if local_bin.is_file():
-        return local_bin
+    for base in (APP_DIR, BUNDLE_ROOT):
+        local_bin = base / "bin" / "ffmpeg" / "ffprobe.exe"
+        if local_bin.is_file():
+            return local_bin
     on_path = shutil.which("ffprobe")
     if on_path:
         return Path(on_path)
@@ -60,9 +69,10 @@ def find_ffprobe() -> Path:
 
 
 def find_rife() -> Path | None:
-    candidate = BIN_DIR / "rife" / "rife-ncnn-vulkan.exe"
-    if candidate.is_file():
-        return candidate
+    for base in (APP_DIR, BUNDLE_ROOT):
+        candidate = base / "bin" / "rife" / "rife-ncnn-vulkan.exe"
+        if candidate.is_file():
+            return candidate
     on_path = shutil.which("rife-ncnn-vulkan")
     if on_path:
         return Path(on_path)

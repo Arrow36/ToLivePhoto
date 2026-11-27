@@ -31,8 +31,15 @@ PALETTE = {
     "border_soft": "#D4E0F4",
 }
 
+from ..core.tools import BUNDLE_ROOT
+
 _FONT_FAMILY_CACHE: str | None = None
-_FONT_PATH = Path(__file__).resolve().parent.parent / "assets" / "fonts" / "DouyinSansBold.ttf"
+_PACKAGED_FONT_PATH = BUNDLE_ROOT / "tolivephoto" / "assets" / "fonts" / "DouyinSansBold.ttf"
+_FONT_PATH = (
+    _PACKAGED_FONT_PATH
+    if _PACKAGED_FONT_PATH.is_file()
+    else (Path(__file__).resolve().parent.parent / "assets" / "fonts" / "DouyinSansBold.ttf")
+)
 
 
 def ensure_bytedance_font(app: QApplication | None = None) -> str:

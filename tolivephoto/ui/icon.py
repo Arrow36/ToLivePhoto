@@ -6,7 +6,10 @@ from pathlib import Path
 from PySide6.QtCore import QPointF, Qt
 from PySide6.QtGui import QColor, QIcon, QImage, QPainter, QPixmap, QRadialGradient
 
-ICONS_DIR = Path(__file__).resolve().parent.parent / "assets" / "icons"
+from ..core.tools import BUNDLE_ROOT
+
+_PACKAGED_ICONS_DIR = BUNDLE_ROOT / "tolivephoto" / "assets" / "icons"
+ICONS_DIR = _PACKAGED_ICONS_DIR if _PACKAGED_ICONS_DIR.is_dir() else (Path(__file__).resolve().parent.parent / "assets" / "icons")
 ICON_PNG_PATH = ICONS_DIR / "app_icon.png"
 ICON_ICO_PATH = ICONS_DIR / "app_icon.ico"
 
