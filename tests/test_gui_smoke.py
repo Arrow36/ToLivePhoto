@@ -30,11 +30,13 @@ def test_tolivephoto_gui_v23_offscreen(tmp_path: Path) -> None:
     assert win.main_splitter.handleWidth() >= 12
     assert win.queue_bar.y() < win.video_info_bar.y()
 
-    # 2. No locate button; dual info bar present; blank default EXIF
+    # 2. No locate button, no legacy DCF row; dual info bar present; blank default EXIF
     assert not hasattr(win, "btn_locate_source")
+    assert not hasattr(win, "dcf_row_widget")
+    assert not hasattr(win, "spin_dcf")
     assert "空白" in win.lbl_exif_summary.text()
 
-    # 3. Default Simple Mode uses fixed iPhone bitrate (8 Mbps) & _2live naming (visible preview)
+    # 3. Default Simple Mode uses fixed iPhone bitrate (8 Mbps) & _2live naming for both folder & DCIM
     assert win.simple_container.isVisible()
     assert not win.advanced_container.isVisible()
     if sample.is_file():
@@ -47,11 +49,25 @@ def test_tolivephoto_gui_v23_offscreen(tmp_path: Path) -> None:
         assert sample.name in win.lbl_full_dir_info.text()
         assert "输出规格:" in win.lbl_out_spec_info.text()
 
-    # 4. Switch to Advanced Mode & verify zero overflow
+        win.seg_export_mode.setCurrentKey("usb_dcim")
+        win._on_export_mode_changed()
+        assert "_2live" in win.lbl_usb_dest_preview.text()
+        assert "_2live" in win.lbl_out_file_info.text()
+        win.seg_export_mode.setCurrentKey("folder")
+        win._on_export_mode_changed()
+
+    # 4. Switch to Advanced Mode & verify unified naming under DCIM + zero overflow
     win.set_ui_mode("advanced")
     app.processEvents()
     assert not win.simple_container.isVisible()
     assert win.advanced_container.isVisible()
+    win.seg_export_mode.setCurrentKey("usb_dcim")
+    win._on_export_mode_changed()
+    assert win.folder_naming_widget.isVisible()
+    if sample.is_file():
+        assert "_2live" in win.lbl_usb_dest_preview.text()
+    win.seg_export_mode.setCurrentKey("folder")
+    win._on_export_mode_changed()
     assert win.studio_card.isAncestorOf(win.btn_crop_toggle)
     assert win.studio_card.minimumSizeHint().width() <= 490
 
@@ -95,8 +111,17 @@ def test_tolivephoto_gui_v23_offscreen(tmp_path: Path) -> None:
         c_16_9 = win.preview.get_crop()
         assert abs((c_16_9.w / c_16_9.h) - (16.0 / 9.0)) < 0.02
 
+        assert "center_h" in win.align_buttons and "center_v" in win.align_buttons
         win._on_align_clicked("top")
         assert win.preview.get_crop().y == 0
+        win._on_align_clicked("left")
+        assert win.preview.get_crop().x == 0
+        win._on_align_clicked("center_h")
+        c_ch = win.preview.get_crop()
+        assert abs(c_ch.x - (2160 - c_ch.w) // 2) <= 2 and c_ch.y == 0
+        win._on_align_clicked("center_v")
+        c_cv = win.preview.get_crop()
+        assert abs(c_cv.y - (3240 - c_cv.h) // 2) <= 2
         win._on_align_clicked("center")
         c_ctr = win.preview.get_crop()
         assert abs(c_ctr.y - (3240 - c_ctr.h) // 2) <= 2
@@ -151,6 +176,19 @@ def test_tolivephoto_gui_v23_offscreen(tmp_path: Path) -> None:
         pad = win.preview.get_padding()
         assert pad.bottom > pad.top > 0
         assert win.bg_style_panel.isVisible()
+
+        # Verify pure-white (#FFFFFF) outer border renders as true rgb(255,255,255) on #EAEEF6 contrast backdrop
+        win._set_bg_color("#FFFFFF", win.btn_bg_white)
+        app.processEvents()
+        ws = win.preview._compute_workspace()
+        crect = win.preview._crop_widget_rect(ws)
+        srect = win.preview._sheet_widget_rect(ws)
+        shot = win.preview.grab().toImage()
+        white_pt_col = shot.pixelColor(int(round(srect.center().x())), int(round((crect.bottom() + srect.bottom()) / 2.0)))
+        assert (white_pt_col.red(), white_pt_col.green(), white_pt_col.blue()) == (255, 255, 255)
+        corner_col = shot.pixelColor(4, 4)
+        assert (corner_col.red(), corner_col.green(), corner_col.blue()) != (255, 255, 255)
+
         win._reset_crop()
         assert win.preview.get_padding().is_zero()
         assert not win.preview.is_crop_editing()

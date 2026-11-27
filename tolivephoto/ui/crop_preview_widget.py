@@ -333,7 +333,18 @@ class CropPreviewWidget(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-        painter.fillRect(self.rect(), QColor(self._backdrop_hex))
+
+        backdrop_qcol = QColor(self._backdrop_hex)
+        if self._pixmap is not None and self._video_w > 0 and self._video_h > 0 and not self._compare_original:
+            is_oob_pre = self._crop.is_out_of_bounds(self._video_w, self._video_h) or not self._padding.is_zero()
+            if (
+                is_oob_pre
+                and self._bg_mode == "solid"
+                and QColor(self._bg_color).lightness() >= 235
+                and backdrop_qcol.lightness() >= 235
+            ):
+                backdrop_qcol = QColor("#EAEEF6")
+        painter.fillRect(self.rect(), backdrop_qcol)
 
         if self._pixmap is None or self._video_w <= 0 or self._video_h <= 0:
             painter.setPen(QColor("#4F5776"))
@@ -349,10 +360,13 @@ class CropPreviewWidget(QWidget):
         src_rect = QRectF(self._pixmap.rect())
 
         if self._compare_original:
+            painter.save()
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(QColor(37, 41, 58, 22))
             painter.drawRoundedRect(vrect.translated(2.0, 4.0), 4.0, 4.0)
+            painter.restore()
             painter.drawPixmap(vrect, self._pixmap, src_rect)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.setPen(QPen(QColor("#DF9FE8"), 1.5))
             painter.drawRect(vrect)
 
@@ -370,9 +384,11 @@ class CropPreviewWidget(QWidget):
         is_oob = self._crop.is_out_of_bounds(self._video_w, self._video_h) or has_pad
 
         if not self._crop_editing:
+            painter.save()
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(QColor(37, 41, 58, 22))
             painter.drawRoundedRect(srect.translated(2.0, 4.0), 4.0, 4.0)
+            painter.restore()
 
             painter.save()
             painter.setClipRect(srect)
@@ -387,12 +403,18 @@ class CropPreviewWidget(QWidget):
             painter.drawPixmap(vrect, self._pixmap, src_rect)
             painter.restore()
 
-            painter.setPen(QPen(QColor("#C4D3ED"), 1.0))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(QPen(QColor("#B8C7E4"), 1.0))
             painter.drawRect(srect)
             return
 
         # Interactive crop-editing mode
         if is_oob:
+            painter.save()
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(37, 41, 58, 24))
+            painter.drawRoundedRect(srect.translated(2.0, 4.0), 4.0, 4.0)
+            painter.restore()
             if self._bg_mode == "solid":
                 painter.fillRect(srect, QColor(self._bg_color))
             else:
@@ -415,9 +437,11 @@ class CropPreviewWidget(QWidget):
                 painter.fillRect(QRectF(inter.right(), inter.top(), vrect.right() - inter.right(), inter.height()), mask_color)
 
         if is_oob:
+            painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.setPen(QPen(QColor("#A4C6E9"), 1.5, Qt.PenStyle.DashLine))
             painter.drawRect(srect)
 
+        painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.setPen(QPen(QColor(254, 253, 249, 120), 1, Qt.PenStyle.DashLine))
         for i in (1, 2):
             gx = crect.left() + crect.width() * i / 3.0
@@ -425,6 +449,7 @@ class CropPreviewWidget(QWidget):
             painter.drawLine(QPointF(gx, crect.top()), QPointF(gx, crect.bottom()))
             painter.drawLine(QPointF(crect.left(), gy), QPointF(crect.right(), gy))
 
+        painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.setPen(QPen(QColor("#7D85CC"), 2.5))
         painter.drawRect(crect)
         painter.setBrush(QColor("#FEFDF9"))

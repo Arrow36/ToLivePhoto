@@ -16,7 +16,6 @@ from PySide6.QtGui import (
     QKeySequence,
     QMouseEvent,
     QPixmap,
-    QRegularExpressionValidator,
     QShortcut,
 )
 from PySide6.QtWidgets import (
@@ -65,7 +64,7 @@ from ..core.models import (
 from ..core.pipeline import ConversionResult, compute_scaled_video_dims
 from ..core.probe import probe_video
 from ..core.tools import find_rife, has_nvenc, list_available_rife_models, list_vulkan_gpus
-from ..core.usb_export import extract_4digit_seed, list_usb_drives, normalize_dcf_prefix
+from ..core.usb_export import list_usb_drives
 from .crop_preview_widget import CropPreviewWidget
 from .exif_dialog import ExifEditorDialog
 from .frame_provider import PreviewFrameProvider
@@ -292,7 +291,6 @@ class MainWindow(QMainWindow):
         self._rife_gpu_buttons: dict[int, ChipButton] = {}
 
         self._build_ui()
-        self._load_persisted_dcf_settings()
         self._bind_shortcuts()
         self._refresh_usb_drives()
         self.set_ui_mode("simple")
@@ -638,11 +636,24 @@ class MainWindow(QMainWindow):
         row_manual.addWidget(self.btn_crop_toggle)
         cs_lay.addLayout(row_manual)
 
-        row_align = QHBoxLayout()
-        row_align.setSpacing(4)
         self.align_buttons: dict[str, QPushButton] = {}
+        row_align_top = QHBoxLayout()
+        row_align_top.setSpacing(4)
         for lbl, mode in (
-            ("✛ 居中", "center"),
+            ("✛ 全居中", "center"),
+            ("↔ 左右居中", "center_h"),
+            ("↕ 上下居中", "center_v"),
+        ):
+            btn = QPushButton(lbl)
+            btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            btn.clicked.connect(lambda _=False, m=mode: self._on_align_clicked(m))
+            row_align_top.addWidget(btn, 1)
+            self.align_buttons[mode] = btn
+        cs_lay.addLayout(row_align_top)
+
+        row_align_bot = QHBoxLayout()
+        row_align_bot.setSpacing(4)
+        for lbl, mode in (
             ("⇡ 靠上", "top"),
             ("⇣ 靠下", "bottom"),
             ("⇤ 靠左", "left"),
@@ -651,9 +662,9 @@ class MainWindow(QMainWindow):
             btn = QPushButton(lbl)
             btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             btn.clicked.connect(lambda _=False, m=mode: self._on_align_clicked(m))
-            row_align.addWidget(btn, 1)
+            row_align_bot.addWidget(btn, 1)
             self.align_buttons[mode] = btn
-        cs_lay.addLayout(row_align)
+        cs_lay.addLayout(row_align_bot)
         adv_lay.addWidget(self.crop_subpanel)
 
         # Polaroid Sub-Panel (composable: works standalone or on top of cropped frame)
@@ -1074,35 +1085,6 @@ class MainWindow(QMainWindow):
         row_drv.addWidget(self.btn_browse_usb)
         usb_lay.addLayout(row_drv)
 
-        self.dcf_row_widget = QWidget()
-        row_dcf = QHBoxLayout(self.dcf_row_widget)
-        row_dcf.setContentsMargins(0, 0, 0, 0)
-        row_dcf.setSpacing(5)
-        row_dcf.addWidget(_field_lbl("相机编号"))
-        self.edit_dcf_prefix = QLineEdit("IMG_")
-        self.edit_dcf_prefix.setFixedWidth(56)
-        self.edit_dcf_prefix.setMaxLength(4)
-        self.edit_dcf_prefix.setValidator(QRegularExpressionValidator(r"[A-Za-z0-9_]{1,4}"))
-        self.edit_dcf_prefix.textChanged.connect(self._on_dcf_changed)
-        row_dcf.addWidget(self.edit_dcf_prefix)
-
-        self.spin_dcf = FourDigitSpinBox()
-        self.spin_dcf.setRange(1, 9999)
-        self.spin_dcf.setValue(7607)
-        self.spin_dcf.setFixedWidth(74)
-        self.spin_dcf.valueChanged.connect(self._on_dcf_changed)
-        row_dcf.addWidget(self.spin_dcf)
-
-        self.btn_dcf_from_file = QPushButton("取文件名")
-        self.btn_dcf_from_file.clicked.connect(self._reset_dcf_from_filename)
-        row_dcf.addWidget(self.btn_dcf_from_file)
-
-        self.chk_dcf_auto_inc = StyledCheckBox("自动+1")
-        self.chk_dcf_auto_inc.setChecked(True)
-        self.chk_dcf_auto_inc.toggled.connect(self._save_dcf_settings)
-        row_dcf.addWidget(self.chk_dcf_auto_inc, 1)
-        usb_lay.addWidget(self.dcf_row_widget)
-
         self.lbl_usb_dest_preview = ElidedLabel("", Qt.TextElideMode.ElideMiddle)
         self.lbl_usb_dest_preview.setStyleSheet(f"color: {PALETTE['ink_secondary']};")
         usb_lay.addWidget(self.lbl_usb_dest_preview)
@@ -1125,9 +1107,14 @@ class MainWindow(QMainWindow):
         fol_lay.addWidget(self.chk_livp)
         fol_vbox.addLayout(fol_lay)
 
+        self.lbl_folder_dest_preview = ElidedLabel("", Qt.TextElideMode.ElideMiddle)
+        self.lbl_folder_dest_preview.setStyleSheet(f"color: {PALETTE['ink_secondary']};")
+        fol_vbox.addWidget(self.lbl_folder_dest_preview)
+        sh_lay.addWidget(self.folder_panel)
+
         self.folder_naming_widget = QWidget()
         fn_lay = QVBoxLayout(self.folder_naming_widget)
-        fn_lay.setContentsMargins(0, 0, 0, 0)
+        fn_lay.setContentsMargins(0, 2, 0, 0)
         fn_lay.setSpacing(5)
         self.seg_folder_naming = SegmentedBar(
             [("源名+后缀", "suffix"), ("原文件名", "original"), ("前缀+序号", "prefix_seq"), ("自定义", "custom")]
@@ -1157,12 +1144,7 @@ class MainWindow(QMainWindow):
         fn_sub.addWidget(self.spin_folder_seq)
         fn_sub.addWidget(self.chk_avoid_overwrite, 1)
         fn_lay.addLayout(fn_sub)
-        fol_vbox.addWidget(self.folder_naming_widget)
-
-        self.lbl_folder_dest_preview = ElidedLabel("", Qt.TextElideMode.ElideMiddle)
-        self.lbl_folder_dest_preview.setStyleSheet(f"color: {PALETTE['ink_secondary']};")
-        fol_vbox.addWidget(self.lbl_folder_dest_preview)
-        sh_lay.addWidget(self.folder_panel)
+        sh_lay.addWidget(self.folder_naming_widget)
 
         self.chk_hw_encode = StyledCheckBox(
             "NVIDIA NVENC GPU 硬件编码" if self._nvenc_available else "CPU x264 编码 (未检测到 NVENC)"
@@ -1231,7 +1213,6 @@ class MainWindow(QMainWindow):
         self.seg_ui_mode.setCurrentKey(self._ui_mode)
         self.simple_container.setVisible(not is_adv)
         self.advanced_container.setVisible(is_adv)
-        self.dcf_row_widget.setVisible(is_adv)
         self.folder_naming_widget.setVisible(is_adv)
         self.chk_livp.setVisible(is_adv)
         self.chk_hw_encode.setVisible(is_adv)
@@ -2401,52 +2382,29 @@ class MainWindow(QMainWindow):
         if folder:
             self.edit_folder.setText(folder)
 
-    def _load_persisted_dcf_settings(self) -> None:
-        self._syncing_ui = True
-        try:
-            pfx = str(self._settings.value("dcf_prefix", "IMG_"))
-            num = int(self._settings.value("dcf_number", 7607))
-            auto_inc = str(self._settings.value("dcf_auto_inc", "true")).lower() == "true"
-            self.edit_dcf_prefix.setText(pfx)
-            self.spin_dcf.setValue(max(1, min(9999, num)))
-            self.chk_dcf_auto_inc.setChecked(auto_inc)
-        finally:
-            self._syncing_ui = False
-
-    def _save_dcf_settings(self) -> None:
-        if self._syncing_ui:
-            return
-        self._settings.setValue("dcf_prefix", normalize_dcf_prefix(self.edit_dcf_prefix.text()))
-        self._settings.setValue("dcf_number", self.spin_dcf.value())
-        self._settings.setValue("dcf_auto_inc", self.chk_dcf_auto_inc.isChecked())
-
-    def _on_dcf_changed(self) -> None:
-        self._save_dcf_settings()
-        self._update_export_preview()
-
-    def _reset_dcf_from_filename(self) -> None:
-        if self._video_info is None:
-            return
-        self.spin_dcf.setValue(extract_4digit_seed(self._video_info.path.stem))
-
     def _update_export_preview(self) -> None:
+        job = self._build_job() if self._video_info is not None else None
+        ext = "HEIC" if self.seg_img_fmt.currentKey() == "heic" else "JPG"
         if self.rb_export_usb.isChecked():
-            root = str(self.combo_usb.currentData() or "")
-            pfx = normalize_dcf_prefix(self.edit_dcf_prefix.text())
-            num = self.spin_dcf.value()
-            ext = "HEIC" if self.seg_img_fmt.currentKey() == "heic" else "JPG"
+            root = str(self.combo_usb.currentData() or "").strip()
+            rel_pair = (
+                preview_output_filename(self._video_info, job)
+                if (self._video_info is not None and job is not None)
+                else f"DCIM/100APPLE/源文件名_2live.{ext} + .MOV"
+            )
             if not root:
-                self.lbl_usb_dest_preview.setText("目标路径: 请先插入 U盘 或点击「自选目录」")
+                self.lbl_usb_dest_preview.setText(f"输出预览: <U盘>/{rel_pair} (请插入U盘或自选目录)")
             else:
-                full = str(Path(root) / "DCIM" / "100APPLE" / f"{pfx}{num:04d}.{ext}")
-                self.lbl_usb_dest_preview.setText(f"目标路径: {full}")
-        elif self._video_info is not None:
-            job = self._build_job()
-            name_pair = preview_output_filename(self._video_info, job)
-            self.lbl_folder_dest_preview.setText(f"输出预览: {Path(self.edit_folder.text().strip()) / name_pair}")
+                self.lbl_usb_dest_preview.setText(f"输出预览: {Path(root) / rel_pair}")
+        else:
+            out_dir = Path(self.edit_folder.text().strip())
+            if self._video_info is not None and job is not None:
+                name_pair = preview_output_filename(self._video_info, job)
+                self.lbl_folder_dest_preview.setText(f"输出预览: {out_dir / name_pair}")
+            else:
+                self.lbl_folder_dest_preview.setText(f"输出预览: {out_dir / f'源文件名_2live.{ext} + .MOV'}")
 
-        if self._video_info is not None:
-            job = self._build_job()
+        if self._video_info is not None and job is not None:
             self.lbl_out_file_info.setText(f"输出名: {preview_output_filename(self._video_info, job)}")
 
     # ---------- Job Builder & Summary ----------
@@ -2502,8 +2460,6 @@ class MainWindow(QMainWindow):
             external_key_aspect_mode=self._selected_ext_aspect_mode(),  # type: ignore[arg-type]
             export_mode="usb_dcim" if is_usb else "folder",
             output_root=out_root,
-            dcf_prefix=normalize_dcf_prefix(self.edit_dcf_prefix.text()),
-            dcf_number=self.spin_dcf.value(),
             folder_naming_mode=folder_mode,  # type: ignore[arg-type]
             folder_suffix=folder_sfx,
             folder_custom_prefix=self.edit_folder_prefix.text().strip() or "LIVE_",
@@ -2520,7 +2476,7 @@ class MainWindow(QMainWindow):
             exif_metadata=self._exif_metadata,
         )
 
-    def _build_job_for_state(self, st: QueueItemState, dcf_num: int) -> ConversionJob:
+    def _build_job_for_state(self, st: QueueItemState) -> ConversionJob:
         is_usb = self.rb_export_usb.isChecked()
         usb_data = str(self.combo_usb.currentData() or "")
         out_root = Path(usb_data) if is_usb else Path(self.edit_folder.text().strip())
@@ -2555,8 +2511,6 @@ class MainWindow(QMainWindow):
             external_key_aspect_mode=st.external_key_aspect_mode,  # type: ignore[arg-type]
             export_mode="usb_dcim" if is_usb else "folder",
             output_root=out_root,
-            dcf_prefix=normalize_dcf_prefix(self.edit_dcf_prefix.text()),
-            dcf_number=dcf_num,
             folder_naming_mode=folder_mode,  # type: ignore[arg-type]
             folder_suffix=folder_sfx,
             folder_custom_prefix=self.edit_folder_prefix.text().strip() or "LIVE_",
@@ -2757,8 +2711,7 @@ class MainWindow(QMainWindow):
         if not self._queue or not self._validate_export_target():
             return
         self._capture_active_state()
-        dcf_seed = self.spin_dcf.value()
-        jobs = [self._build_job_for_state(st, dcf_seed) for st in self._queue]
+        jobs = [self._build_job_for_state(st) for st in self._queue]
 
         self.btn_convert.setEnabled(False)
         self.btn_convert_all.setEnabled(False)
@@ -2767,7 +2720,7 @@ class MainWindow(QMainWindow):
         self.progress_bar.setValue(0)
         self.lbl_status.setText(f"正在启动批量转换 ({len(jobs)} 个视频)...")
 
-        worker = BatchConversionWorker(jobs, auto_inc_dcf=self.chk_dcf_auto_inc.isChecked())
+        worker = BatchConversionWorker(jobs)
         worker.progress.connect(self._on_worker_progress)
         worker.allSucceeded.connect(self._on_batch_succeeded)
         worker.cancelled.connect(self._on_worker_cancelled)
@@ -2793,9 +2746,8 @@ class MainWindow(QMainWindow):
         self.btn_open_out.setEnabled(True)
         self.progress_bar.setValue(100)
 
-        if result.used_dcf_number is not None and self.chk_dcf_auto_inc.isChecked():
-            next_num = (result.used_dcf_number % 9999) + 1
-            self.spin_dcf.setValue(next_num)
+        if self._ui_mode == "advanced" and self.seg_folder_naming.currentKey() == "prefix_seq":
+            self.spin_folder_seq.setValue((self.spin_folder_seq.value() % 9999) + 1)
 
         dur_txt = format_frames_as_sec_frames(result.summary.output_frames, result.summary.output_fps)
         self.lbl_status.setText(
@@ -2816,9 +2768,8 @@ class MainWindow(QMainWindow):
         if results:
             self._last_result = results[-1]
             self.btn_open_out.setEnabled(True)
-            last_num = results[-1].used_dcf_number
-            if last_num is not None and self.chk_dcf_auto_inc.isChecked():
-                self.spin_dcf.setValue((last_num % 9999) + 1)
+            if self._ui_mode == "advanced" and self.seg_folder_naming.currentKey() == "prefix_seq":
+                self.spin_folder_seq.setValue(((self.spin_folder_seq.value() + len(results) - 1) % 9999) + 1)
         self.lbl_status.setText(f"批量生成完成！共导出 {len(results)} 组实况照片。")
         QMessageBox.information(
             self,

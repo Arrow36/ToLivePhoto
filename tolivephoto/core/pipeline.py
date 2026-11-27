@@ -614,14 +614,23 @@ def run_conversion(
             progress_cb(96, "正在写入导出目录...")
         used_dcf_number: int | None = None
         if job.export_mode == "usb_dcim":
-            img_dest, mov_dest, _stem, used_dcf_number = resolve_dcf_pair_paths(
-                usb_root=job.output_root,
-                preferred_number=job.dcf_number,
-                source_stem=info.path.stem,
-                image_ext=ext,
-                prefix=job.dcf_prefix,
-            )
-            livp_dest: Path | None = None
+            if job.dcf_number is not None:
+                img_dest, mov_dest, _stem, used_dcf_number = resolve_dcf_pair_paths(
+                    usb_root=job.output_root,
+                    preferred_number=job.dcf_number,
+                    source_stem=info.path.stem,
+                    image_ext=ext,
+                    prefix=job.dcf_prefix,
+                )
+                livp_dest: Path | None = None
+            else:
+                dcim_dir = Path(job.output_root) / "DCIM" / "100APPLE"
+                img_dest, mov_dest, livp_dest, _stem = resolve_folder_output_paths(
+                    out_dir=dcim_dir,
+                    source_stem=info.path.stem,
+                    image_ext=ext,
+                    job=job,
+                )
         else:
             img_dest, mov_dest, livp_dest, _stem = resolve_folder_output_paths(
                 out_dir=Path(job.output_root),

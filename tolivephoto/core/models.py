@@ -446,6 +446,10 @@ def build_folder_stem(source_stem: str, job: ConversionJob) -> str:
     return f"{_sanitize_stem(source_stem, 'LivePhoto')}{sfx}"
 
 
+def _stem_exists(out_dir: Path, stem: str, ext: str) -> bool:
+    return any((out_dir / f"{stem}.{e}").exists() for e in {ext, "HEIC", "JPG", "MOV"})
+
+
 def resolve_folder_output_paths(
     out_dir: Path,
     source_stem: str,
@@ -463,15 +467,12 @@ def resolve_folder_output_paths(
         if job.folder_naming_mode == "prefix_seq":
             pfx = _sanitize_stem(job.folder_custom_prefix, "LIVE_")
             seq = max(1, int(job.folder_seq_number))
-            while (
-                (out_dir / f"{pfx}{seq:04d}.{ext}").exists()
-                or (out_dir / f"{pfx}{seq:04d}.MOV").exists()
-            ):
+            while _stem_exists(out_dir, f"{pfx}{seq:04d}", ext):
                 seq += 1
             stem = f"{pfx}{seq:04d}"
         else:
             counter = 1
-            while (out_dir / f"{stem}.{ext}").exists() or (out_dir / f"{stem}.MOV").exists():
+            while _stem_exists(out_dir, stem, ext):
                 stem = f"{base_stem}_{counter}"
                 counter += 1
 
@@ -485,9 +486,12 @@ def preview_output_filename(info: VideoInfo, job: ConversionJob) -> str:
     """Return human-readable preview of target output filename pair."""
     ext = "HEIC" if job.image_format == "heic" else "JPG"
     if job.export_mode == "usb_dcim":
-        num = job.dcf_number if job.dcf_number is not None else 1
-        pfx = (job.dcf_prefix or "IMG_").upper()[:4].ljust(4, "_")
-        return f"DCIM/100APPLE/{pfx}{num:04d}.{ext} + .MOV"
+        if job.dcf_number is not None:
+            num = job.dcf_number
+            pfx = (job.dcf_prefix or "IMG_").upper()[:4].ljust(4, "_")
+            return f"DCIM/100APPLE/{pfx}{num:04d}.{ext} + .MOV"
+        stem = build_folder_stem(info.path.stem, job)
+        return f"DCIM/100APPLE/{stem}.{ext} + .MOV"
     stem = build_folder_stem(info.path.stem, job)
     return f"{stem}.{ext} + .MOV"
 

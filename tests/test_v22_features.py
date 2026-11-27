@@ -13,6 +13,7 @@ from tolivephoto.core.models import (
     ConversionJob,
     CropRect,
     compute_polaroid_layout,
+    preview_output_filename,
     resolve_folder_output_paths,
 )
 
@@ -129,3 +130,35 @@ def test_auto_same_dir_exif_load_on_sidecar_jpg(tmp_path: Path) -> None:
     no_sidecar.write_bytes(b"")
     assert win._auto_load_same_dir_exif(no_sidecar) is None
     win.close()
+
+
+def test_dcim_default_2live_and_modern_naming(tmp_path: Path) -> None:
+    from tolivephoto.core.models import VideoInfo
+
+    info = VideoInfo(
+        path=Path("CSI_7607.mp4"),
+        width=2160,
+        height=3240,
+        fps_num=24,
+        fps_den=1,
+        fps=24.0,
+        nb_frames=59,
+        duration=59 / 24.0,
+        has_audio=True,
+    )
+    job = ConversionJob(
+        video_path=info.path,
+        start_frame=0,
+        end_frame=58,
+        crop=CropRect(0, 0, 2160, 3240),
+        export_mode="usb_dcim",
+        output_root=tmp_path,
+    )
+    assert job.dcf_number is None
+    assert preview_output_filename(info, job) == "DCIM/100APPLE/CSI_7607_2live.HEIC + .MOV"
+
+    dcim_dir = tmp_path / "DCIM" / "100APPLE"
+    img_p, mov_p, _, stem = resolve_folder_output_paths(dcim_dir, info.path.stem, "HEIC", job)
+    assert stem == "CSI_7607_2live"
+    assert img_p == dcim_dir / "CSI_7607_2live.HEIC"
+    assert mov_p == dcim_dir / "CSI_7607_2live.MOV"
