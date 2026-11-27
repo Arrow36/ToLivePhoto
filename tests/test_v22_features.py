@@ -12,6 +12,7 @@ from tolivephoto.core.models import (
     IPHONE_LIVE_BITRATE_MBPS,
     ConversionJob,
     CropRect,
+    compute_polaroid_layout,
     resolve_folder_output_paths,
 )
 
@@ -84,3 +85,47 @@ def test_folder_naming_modes_and_collision_avoidance(tmp_path: Path) -> None:
     )
     _, _, _, stem_seq = resolve_folder_output_paths(tmp_path, "CSI_7607", "HEIC", job_seq)
     assert stem_seq == "LIVE_0005"
+
+
+def test_polaroid_custom_crop_and_preserve_scale() -> None:
+    custom = CropRect(200, 300, 900, 1500)
+    crop_out, pad_out = compute_polaroid_layout("custom_crop", 2160, 3240, current_crop=custom)
+    assert crop_out == custom
+    assert pad_out.bottom > pad_out.top > 0
+    assert pad_out.left == pad_out.right > 0
+
+    crop_mini, pad_mini = compute_polaroid_layout(
+        "mini", 2160, 3240, current_crop=CropRect(400, 400, 1200, 1200), preserve_crop_scale=True
+    )
+    assert crop_mini.w <= 1200 and crop_mini.h <= 1200
+    assert pad_mini.bottom > pad_mini.top > 0
+
+
+def test_auto_same_dir_exif_load_on_sidecar_jpg(tmp_path: Path) -> None:
+    import os
+    from PySide6.QtWidgets import QApplication
+    from tolivephoto.core.exif_io import ExifMetadata
+    from tolivephoto.ui.main_window import MainWindow
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    _app = QApplication.instance() or QApplication([])
+
+    video = tmp_path / "CLIP_0001.mp4"
+    video.write_bytes(b"")
+    sidecar = tmp_path / "CLIP_0001.jpg"
+    img = Image.new("RGB", (64, 64), (10, 20, 30))
+    exif = img.getexif()
+    exif[0x010F] = "Canon"
+    exif[0x0110] = "EOS R5"
+    img.save(sidecar, format="JPEG", exif=exif)
+
+    win = MainWindow()
+    meta = win._auto_load_same_dir_exif(video)
+    assert isinstance(meta, ExifMetadata)
+    assert meta.make == "Canon"
+    assert meta.model == "EOS R5"
+
+    no_sidecar = tmp_path / "CLIP_9999.mp4"
+    no_sidecar.write_bytes(b"")
+    assert win._auto_load_same_dir_exif(no_sidecar) is None
+    win.close()

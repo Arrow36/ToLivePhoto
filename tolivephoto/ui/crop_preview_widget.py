@@ -12,6 +12,7 @@ from ..core.models import CropRect, FramePadding
 
 class CropPreviewWidget(QWidget):
     cropChanged = Signal(object)  # CropRect
+    cropEditingChanged = Signal(bool)
     zoomChanged = Signal(float)
     contextMenuRequested = Signal(object)  # QPoint globalPos
 
@@ -29,7 +30,7 @@ class CropPreviewWidget(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setMinimumSize(460, 380)
+        self.setMinimumSize(360, 320)
         self.setMouseTracking(True)
 
         self._qimage: QImage | None = None
@@ -69,8 +70,12 @@ class CropPreviewWidget(QWidget):
         self.update()
 
     def set_crop_editing(self, enabled: bool) -> None:
-        self._crop_editing = bool(enabled)
+        new_val = bool(enabled)
+        changed = new_val != self._crop_editing
+        self._crop_editing = new_val
         self.update()
+        if changed:
+            self.cropEditingChanged.emit(new_val)
 
     def is_crop_editing(self) -> bool:
         return self._crop_editing
@@ -498,6 +503,13 @@ class CropPreviewWidget(QWidget):
                 self._drag_start_crop = self._crop
                 self._drag_workspace = ws
                 return
+            content_rect = (
+                self._video_widget_rect(ws)
+                .united(self._sheet_widget_rect(ws))
+                .adjusted(-10, -10, 10, 10)
+            )
+            if not content_rect.contains(event.position()):
+                self.set_crop_editing(False)
 
         self._drag_mode = self.HANDLE_PAN
         self._drag_start_pos = event.position()

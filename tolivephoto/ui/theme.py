@@ -152,11 +152,11 @@ QLabel#metaCapsule {{
 }}
 QSplitter::handle {{
     background: transparent;
-    width: 6px;
+    width: 14px;
 }}
 QSplitter::handle:hover {{
-    background: {PALETTE["sky"]};
-    border-radius: 3px;
+    background: rgba(164, 198, 233, 0.35);
+    border-radius: 5px;
 }}
 QPushButton {{
     background-color: {PALETTE["surface_subtle"]};

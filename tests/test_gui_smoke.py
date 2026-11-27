@@ -6,7 +6,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QEvent, QPointF, Qt
 from PySide6.QtGui import QMouseEvent, QWheelEvent
-from PySide6.QtWidgets import QApplication, QComboBox
+from PySide6.QtWidgets import QApplication, QComboBox, QWidget
 
 from tolivephoto.core.models import IPHONE_LIVE_BITRATE_MBPS, CropRect
 from tolivephoto.ui.main_window import FPS_PRESET_VALUES, LONG_EDGE_PRESETS, MainWindow
@@ -24,20 +24,25 @@ def test_tolivephoto_gui_v23_offscreen(tmp_path: Path) -> None:
     win.show()
     app.processEvents()
 
-    # 1. Only output-directory USB selector is a QComboBox
+    # 1. Only output-directory USB selector is a QComboBox; no top brandHeader; splitter gap >= 12px
     assert win.findChildren(QComboBox) == [win.combo_usb]
+    assert win.findChild(QWidget, "brandHeader") is None
+    assert win.main_splitter.handleWidth() >= 12
+    assert win.queue_bar.y() < win.video_info_bar.y()
 
     # 2. No locate button; dual info bar present; blank default EXIF
     assert not hasattr(win, "btn_locate_source")
     assert "空白" in win.lbl_exif_summary.text()
 
-    # 3. Default Simple Mode uses fixed iPhone bitrate (8 Mbps) & _2live naming
+    # 3. Default Simple Mode uses fixed iPhone bitrate (8 Mbps) & _2live naming (visible preview)
     assert win.simple_container.isVisible()
     assert not win.advanced_container.isVisible()
     if sample.is_file():
         job_simple = win._build_job()
         assert job_simple.video_bitrate_mbps == IPHONE_LIVE_BITRATE_MBPS
         assert "_2live" in win.lbl_out_file_info.text()
+        assert "_2live" in win.lbl_folder_dest_preview.text()
+        assert win.lbl_folder_dest_preview.isVisible()
         assert str(sample.parent) in win.lbl_full_dir_info.text()
         assert sample.name in win.lbl_full_dir_info.text()
         assert "输出规格:" in win.lbl_out_spec_info.text()
@@ -105,7 +110,43 @@ def test_tolivephoto_gui_v23_offscreen(tmp_path: Path) -> None:
         assert c_4_3.w > c_4_3.h
         assert win.preview.is_crop_editing()
 
-        # 10. Polaroid & Reset
+        # 10. Custom ratio (9:15) persists across inside <-> pad
+        win.edit_ratio_w.setText("9")
+        win.edit_ratio_h.setText("15")
+        win._apply_manual_ratio()
+        c_9_15_in = win.preview.get_crop()
+        assert abs((c_9_15_in.w / c_9_15_in.h) - (9.0 / 15.0)) < 0.02
+        win.seg_fit_mode.setCurrentKey("pad")
+        win._reapply_current_aspect("pad")
+        c_9_15_pad = win.preview.get_crop()
+        assert abs((c_9_15_pad.w / c_9_15_pad.h) - (9.0 / 15.0)) < 0.02
+        win.seg_fit_mode.setCurrentKey("inside")
+        win._reapply_current_aspect("inside")
+
+        # 11. Click outside video/sheet hides crop box
+        assert win.preview.is_crop_editing()
+        click_out = QMouseEvent(
+            QEvent.Type.MouseButtonPress,
+            QPointF(2.0, 2.0),
+            QPointF(2.0, 2.0),
+            Qt.MouseButton.LeftButton,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+        QApplication.sendEvent(win.preview, click_out)
+        assert not win.preview.is_crop_editing()
+        assert win.btn_crop_toggle.isChecked()
+
+        # 12. Composable Crop + Polaroid & ratio labels
+        assert "3:4" in win._polaroid_buttons["mini"].text()
+        assert "16:10" in win._polaroid_buttons["wide"].text()
+        assert "custom_crop" in win._polaroid_buttons
+        win._apply_polaroid_preset("custom_crop")
+        pad_custom = win.preview.get_padding()
+        assert pad_custom.bottom > pad_custom.top > 0
+        c_after_custom_pol = win.preview.get_crop()
+        assert abs((c_after_custom_pol.w / c_after_custom_pol.h) - (9.0 / 15.0)) < 0.02
+
         win._apply_polaroid_preset("mini")
         pad = win.preview.get_padding()
         assert pad.bottom > pad.top > 0
@@ -113,6 +154,12 @@ def test_tolivephoto_gui_v23_offscreen(tmp_path: Path) -> None:
         win._reset_crop()
         assert win.preview.get_padding().is_zero()
         assert not win.preview.is_crop_editing()
+
+        # 13. Compressed window layout check
+        win.resize(920, 760)
+        app.processEvents()
+        assert win.studio_card.minimumWidth() <= 440
+        assert win.width() <= 960
 
         # 11. Double-click zoom toggle
         dbl = QMouseEvent(

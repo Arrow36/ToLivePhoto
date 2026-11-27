@@ -108,9 +108,10 @@ class QueueItemState:
     end_frame: int
     crop: CropRect
     padding: FramePadding
-    framing_mode: str  # "none" | "crop" | "polaroid"
+    framing_mode: str  # "none" | "crop"
     polaroid_preset: str | None
     aspect_key: str
+    custom_ratio: float | None
     orientation: str   # "portrait" | "landscape"
     audio_mode: str    # "speed_sync" | "trim_fade" | "mute"
     bg_mode: str       # "blur" | "solid"
@@ -271,6 +272,7 @@ class MainWindow(QMainWindow):
         self._ui_mode = "simple"
         self._framing_mode = "none"
         self._active_aspect_key = "orig"
+        self._custom_ratio: float | None = None
         self._orientation = "portrait"
         self._active_polaroid: str | None = None
         self._selected_rife_mode = "target_fps"
@@ -306,65 +308,19 @@ class MainWindow(QMainWindow):
         central = QWidget()
         self.setCentralWidget(central)
         outer = QVBoxLayout(central)
-        outer.setContentsMargins(12, 10, 12, 10)
+        outer.setContentsMargins(10, 10, 10, 10)
         outer.setSpacing(8)
-
-        # ---- TOP BAR: BRAND + VISUAL THUMBNAIL QUEUE ----
-        header = QFrame()
-        header.setObjectName("brandHeader")
-        header.setFixedHeight(68)
-        h_lay = QHBoxLayout(header)
-        h_lay.setContentsMargins(12, 6, 12, 6)
-        h_lay.setSpacing(10)
-
-        lbl_icon = QLabel()
-        lbl_icon.setPixmap(create_app_icon().pixmap(30, 30))
-        lbl_brand = QLabel("ToLivePhoto")
-        lbl_brand.setStyleSheet("font-size: 18px; color: #25293A;")
-        lbl_pill = QLabel("LIVE STUDIO")
-        lbl_pill.setObjectName("livePill")
-
-        h_lay.addWidget(lbl_icon)
-        h_lay.addWidget(lbl_brand)
-        h_lay.addWidget(lbl_pill)
-        h_lay.addSpacing(4)
-
-        self.queue_scroll = QScrollArea()
-        self.queue_scroll.setWidgetResizable(True)
-        self.queue_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.queue_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        self.queue_scroll.setFixedHeight(56)
-        self.queue_scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
-        self.queue_chips_host = QWidget()
-        self.queue_chips_host.setObjectName("queueChipsHost")
-        self.queue_chips_lay = QHBoxLayout(self.queue_chips_host)
-        self.queue_chips_lay.setContentsMargins(0, 2, 0, 2)
-        self.queue_chips_lay.setSpacing(6)
-        self.queue_scroll.setWidget(self.queue_chips_host)
-        h_lay.addWidget(self.queue_scroll, 1)
-
-        self.btn_add_queue = QPushButton("+ 添加")
-        self.btn_add_queue.clicked.connect(self._on_open_videos)
-        self.btn_queue_sync = QPushButton("⇄ 同步参数")
-        self.btn_queue_sync.clicked.connect(self._sync_current_settings_to_all)
-        self.btn_queue_sync.setVisible(False)
-        self.btn_queue_clear = QPushButton("清空")
-        self.btn_queue_clear.clicked.connect(self._clear_queue)
-        self.btn_queue_clear.setVisible(False)
-        h_lay.addWidget(self.btn_add_queue)
-        h_lay.addWidget(self.btn_queue_sync)
-        h_lay.addWidget(self.btn_queue_clear)
-        outer.addWidget(header)
 
         # ---- RESIZABLE MAIN SPLITTER ----
         self.main_splitter = QSplitter(Qt.Orientation.Horizontal)
         self.main_splitter.setChildrenCollapsible(False)
+        self.main_splitter.setHandleWidth(14)
         outer.addWidget(self.main_splitter, 1)
 
         # ---- LEFT STAGE ----
         stage_card = QFrame()
         stage_card.setObjectName("stageCard")
-        stage_card.setMinimumWidth(560)
+        stage_card.setMinimumWidth(420)
         left_layout = QVBoxLayout(stage_card)
         left_layout.setContentsMargins(10, 8, 10, 8)
         left_layout.setSpacing(6)
@@ -398,15 +354,19 @@ class MainWindow(QMainWindow):
         self.preview = CropPreviewWidget()
         self.preview.set_backdrop_color(self._backdrop_hex)
         self.preview.cropChanged.connect(self._on_crop_changed)
+        self.preview.cropEditingChanged.connect(self._on_preview_crop_editing_changed)
         self.preview.zoomChanged.connect(self._on_zoom_changed)
         self.preview.contextMenuRequested.connect(self._on_preview_context_menu)
+        self.preview.setToolTip("Space 播放 · ←/→ 逐帧 · [ / ] 入出点 · K 设主图 · 双击画布缩放 · 滚轮缩放 · 左键拖拽")
         left_layout.addWidget(self.preview, 1)
 
-        # 3-Cluster Transport Bar
+        # 3-Cluster Transport Bar (compact for narrow windows)
         transport = QHBoxLayout()
-        transport.setSpacing(6)
-        self.btn_set_in = QPushButton("[ 设为起点")
-        self.btn_set_out = QPushButton("设为终点 ]")
+        transport.setSpacing(4)
+        self.btn_set_in = QPushButton("[ 起点")
+        self.btn_set_in.setToolTip("将当前帧设为片段起点 ([)")
+        self.btn_set_out = QPushButton("终点 ]")
+        self.btn_set_out.setToolTip("将当前帧设为片段终点 (])")
         self.btn_set_in.clicked.connect(self._set_current_as_start)
         self.btn_set_out.clicked.connect(self._set_current_as_end)
         transport.addWidget(self.btn_set_in)
@@ -418,7 +378,7 @@ class MainWindow(QMainWindow):
         self.btn_prev_frame = QPushButton("◀ -1帧")
         self.btn_play = QPushButton("▶ 播放")
         self.btn_play.setObjectName("heroPlayBtn")
-        self.btn_play.setMinimumWidth(92)
+        self.btn_play.setMinimumWidth(78)
         self.btn_next_frame = QPushButton("+1帧 ▶")
         self.btn_jump_out = QPushButton("⏭")
         self.btn_jump_out.setToolTip("跳至片段终点")
@@ -433,7 +393,8 @@ class MainWindow(QMainWindow):
             transport.addWidget(b)
         transport.addStretch(1)
 
-        self.btn_set_key = QPushButton("★ 设为主图 (K)")
+        self.btn_set_key = QPushButton("★ 设主图")
+        self.btn_set_key.setToolTip("将当前帧设为实况封面主图 (K)")
         self.btn_set_key.setObjectName("keyStarBtn")
         self.btn_set_key.clicked.connect(self._set_current_as_key)
         transport.addWidget(self.btn_set_key)
@@ -446,29 +407,63 @@ class MainWindow(QMainWindow):
         left_layout.addWidget(self.timeline)
 
         playhead_row = QHBoxLayout()
-        self.lbl_playhead = QLabel("当前: 第 0 帧  |  设定时刻: 0秒0帧 / 0秒0帧")
+        self.lbl_playhead = ElidedLabel("当前: 第 0 帧  |  设定时刻: 0秒0帧 / 0秒0帧", Qt.TextElideMode.ElideRight)
         self.lbl_playhead.setStyleSheet(f"color: {PALETTE['ink_secondary']};")
-        lbl_keys = QLabel("Space 播放 · ←/→ 逐帧 · [ / ] 入出点 · K 设主图 · 双击画布缩放")
-        lbl_keys.setStyleSheet(f"color: {PALETTE['ink_muted']};")
-        playhead_row.addWidget(self.lbl_playhead)
-        playhead_row.addStretch(1)
-        playhead_row.addWidget(lbl_keys)
+        self.lbl_playhead.setToolTip("Space 播放 · ←/→ 逐帧 · [ / ] 入出点 · K 设主图 · 双击画布缩放")
+        playhead_row.addWidget(self.lbl_playhead, 1)
         left_layout.addLayout(playhead_row)
 
-        # ---- BOTTOM DUAL VIDEO INFO BAR (SOURCE LEFT + OUTPUT RIGHT + IMPORT) ----
+        # ---- MULTI-VIDEO QUEUE BAR (ABOVE VIDEO INFO BAR) ----
+        self.queue_bar = QFrame()
+        self.queue_bar.setObjectName("queueBar")
+        qb_lay = QHBoxLayout(self.queue_bar)
+        qb_lay.setContentsMargins(6, 4, 6, 4)
+        qb_lay.setSpacing(6)
+
+        self.queue_scroll = QScrollArea()
+        self.queue_scroll.setWidgetResizable(True)
+        self.queue_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.queue_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.queue_scroll.setFixedHeight(54)
+        self.queue_scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+        self.queue_chips_host = QWidget()
+        self.queue_chips_host.setObjectName("queueChipsHost")
+        self.queue_chips_lay = QHBoxLayout(self.queue_chips_host)
+        self.queue_chips_lay.setContentsMargins(0, 2, 0, 2)
+        self.queue_chips_lay.setSpacing(6)
+        self.queue_scroll.setWidget(self.queue_chips_host)
+        qb_lay.addWidget(self.queue_scroll, 1)
+
+        self.btn_open = QPushButton("📂 导入视频")
+        self.btn_open.setToolTip("导入一个或多个视频 (支持拖放)")
+        self.btn_open.setObjectName("cropToggleBtn")
+        self.btn_open.clicked.connect(self._on_open_videos)
+        self.btn_add_queue = self.btn_open
+        self.btn_queue_sync = QPushButton("⇄ 同步")
+        self.btn_queue_sync.setToolTip("将当前视频参数同步到队列所有视频")
+        self.btn_queue_sync.clicked.connect(self._sync_current_settings_to_all)
+        self.btn_queue_sync.setVisible(False)
+        self.btn_queue_clear = QPushButton("清空")
+        self.btn_queue_clear.clicked.connect(self._clear_queue)
+        self.btn_queue_clear.setVisible(False)
+        qb_lay.addWidget(self.btn_open)
+        qb_lay.addWidget(self.btn_queue_sync)
+        qb_lay.addWidget(self.btn_queue_clear)
+        left_layout.addWidget(self.queue_bar)
+
+        # ---- BOTTOM DUAL VIDEO INFO BAR (SOURCE LEFT + OUTPUT RIGHT) ----
         self.video_info_bar = QFrame()
         self.video_info_bar.setObjectName("videoInfoBar")
         vib_lay = QHBoxLayout(self.video_info_bar)
-        vib_lay.setContentsMargins(10, 7, 10, 7)
-        vib_lay.setSpacing(10)
+        vib_lay.setContentsMargins(10, 6, 10, 6)
+        vib_lay.setSpacing(8)
 
         src_col = QVBoxLayout()
         src_col.setSpacing(2)
-        self.lbl_full_dir_info = QLabel("源目录: 未加载视频 (支持拖入多个 MP4 / MOV 文件)")
-        self.lbl_full_dir_info.setWordWrap(True)
+        self.lbl_full_dir_info = ElidedLabel("源目录: 未加载视频 (支持拖入多个 MP4 / MOV 文件)", Qt.TextElideMode.ElideMiddle)
         self.lbl_full_dir_info.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.lbl_full_dir_info.setStyleSheet(f"color: {PALETTE['ink_primary']};")
-        self.lbl_video_info = QLabel("源规格: -")
+        self.lbl_video_info = ElidedLabel("源规格: -", Qt.TextElideMode.ElideRight)
         self.lbl_video_info.setStyleSheet(f"color: {PALETTE['ink_secondary']};")
         src_col.addWidget(self.lbl_full_dir_info)
         src_col.addWidget(self.lbl_video_info)
@@ -486,10 +481,6 @@ class MainWindow(QMainWindow):
         out_col.addWidget(self.lbl_out_spec_info)
         vib_lay.addLayout(out_col, 4)
 
-        self.btn_open = QPushButton("📂 导入视频 (支持多选)...")
-        self.btn_open.setObjectName("cropToggleBtn")
-        self.btn_open.clicked.connect(self._on_open_videos)
-        vib_lay.addWidget(self.btn_open)
         left_layout.addWidget(self.video_info_bar)
 
         self.main_splitter.addWidget(stage_card)
@@ -497,7 +488,7 @@ class MainWindow(QMainWindow):
         # ---- RIGHT UNIFIED STUDIO CARD ----
         self.studio_card = QFrame()
         self.studio_card.setObjectName("studioCard")
-        self.studio_card.setMinimumWidth(470)
+        self.studio_card.setMinimumWidth(430)
         self.studio_card.setMaximumWidth(740)
         studio_lay = QVBoxLayout(self.studio_card)
         studio_lay.setContentsMargins(12, 10, 12, 10)
@@ -576,11 +567,11 @@ class MainWindow(QMainWindow):
         adv_lay.setContentsMargins(0, 0, 0, 0)
         adv_lay.setSpacing(8)
 
-        # --- Section A: Streamlined 3-Way Framing (原画幅 / 比例裁切 / 拍立得相纸) ---
+        # --- Section A: Composable Framing & Polaroid (原画幅 / 比例裁切 + 拍立得相纸) ---
         adv_lay.addWidget(_section_header("画面构图与拍立得"))
 
         self.seg_framing_mode = SegmentedBar(
-            [("原画幅 (不裁切)", "none"), ("✂ 比例裁切", "crop"), ("🎞 拍立得相纸", "polaroid")]
+            [("原画幅 (不裁切)", "none"), ("✂ 比例裁切", "crop")]
         )
         self.seg_framing_mode.selectionChanged.connect(lambda m: self._on_framing_mode_changed(str(m)))
         adv_lay.addWidget(self.seg_framing_mode)
@@ -665,18 +656,42 @@ class MainWindow(QMainWindow):
         cs_lay.addLayout(row_align)
         adv_lay.addWidget(self.crop_subpanel)
 
-        # Polaroid Sub-Panel (visible when seg_framing_mode == "polaroid")
+        # Polaroid Sub-Panel (composable: works standalone or on top of cropped frame)
         self.polaroid_subpanel = QWidget()
-        pol_grid = QGridLayout(self.polaroid_subpanel)
-        pol_grid.setContentsMargins(0, 2, 0, 0)
+        pol_vbox = QVBoxLayout(self.polaroid_subpanel)
+        pol_vbox.setContentsMargins(0, 2, 0, 0)
+        pol_vbox.setSpacing(4)
+        pol_hdr = _field_lbl("拍立得相纸 (可先比例裁切再套框)")
+        pol_vbox.addWidget(pol_hdr)
+        pol_grid = QGridLayout()
+        pol_grid.setContentsMargins(0, 0, 0, 0)
         pol_grid.setSpacing(5)
-        for idx, (pkey, spec) in enumerate(POLAROID_PRESETS.items()):
-            pb = ChipButton(spec.label)
-            pb.setToolTip(f"{spec.label} ({int(spec.sheet_w_mm)}×{int(spec.sheet_h_mm)}mm)")
+        self.polaroid_btn_group = QButtonGroup(self)
+
+        pb_none = ChipButton("无相框")
+        pb_none.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        pb_none.setChecked(True)
+        pb_none.clicked.connect(lambda _=False: self._apply_polaroid_preset(None))
+        self.polaroid_btn_group.addButton(pb_none)
+        pol_grid.addWidget(pb_none, 0, 0)
+        self._polaroid_buttons["__none__"] = pb_none
+
+        pol_items: list[tuple[str | None, str, str]] = [
+            (pkey, f"{spec.label.replace('Instax ', '').replace('Polaroid ', '')} · {spec.ratio_label}", f"{spec.label} ({int(spec.sheet_w_mm)}×{int(spec.sheet_h_mm)}mm，画幅比 {spec.ratio_label})")
+            for pkey, spec in POLAROID_PRESETS.items()
+        ]
+        pol_items.append(("custom_crop", "保持裁切比例套框", "保留当前比例裁切结果并直接套入拍立得相纸边框"))
+
+        for idx, (pkey, plabel, ptip) in enumerate(pol_items, start=1):
+            pb = ChipButton(plabel)
+            pb.setToolTip(ptip)
             pb.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             pb.clicked.connect(lambda _=False, k=pkey: self._apply_polaroid_preset(k))
-            pol_grid.addWidget(pb, idx // 2, idx % 2)
-            self._polaroid_buttons[pkey] = pb
+            self.polaroid_btn_group.addButton(pb)
+            pol_grid.addWidget(pb, idx // 3, idx % 3)
+            if pkey is not None:
+                self._polaroid_buttons[pkey] = pb
+        pol_vbox.addLayout(pol_grid)
         adv_lay.addWidget(self.polaroid_subpanel)
 
         # Contextual Background Style Panel (only shown for Polaroid or out-of-bounds pad)
@@ -789,15 +804,19 @@ class MainWindow(QMainWindow):
         row_rgpu.setSpacing(5)
         row_rgpu.addWidget(_field_lbl("硬件加速"))
         self.rife_gpu_group = QButtonGroup(self)
-        gpu_items: list[tuple[int, str]] = (
-            [(gid, f"⚡ GPU: {name}") for gid, name in self._vulkan_gpus]
+        def _short_gpu(n: str) -> str:
+            s = n.replace("NVIDIA ", "").replace("GeForce ", "").replace("AMD ", "").replace("Radeon ", "").strip()
+            return s if len(s) <= 22 else s[:21] + "…"
+
+        gpu_items: list[tuple[int, str, str]] = (
+            [(gid, f"⚡ {_short_gpu(name)}", f"GPU {gid}: {name}") for gid, name in self._vulkan_gpus]
             if self._vulkan_gpus
-            else [(0, "⚡ Vulkan GPU")]
+            else [(0, "⚡ Vulkan GPU", "Vulkan GPU")]
         )
-        gpu_items.append((-1, "CPU"))
-        for gid, glabel in gpu_items:
+        gpu_items.append((-1, "CPU", "CPU 软件运算"))
+        for gid, glabel, gtip in gpu_items:
             gb = ChipButton(glabel)
-            gb.setToolTip(glabel)
+            gb.setToolTip(gtip)
             gb.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             self.rife_gpu_group.addButton(gb)
             gb.clicked.connect(lambda _=False, g=gid: self._on_rife_gpu_clicked(g))
@@ -1138,11 +1157,11 @@ class MainWindow(QMainWindow):
         fn_sub.addWidget(self.spin_folder_seq)
         fn_sub.addWidget(self.chk_avoid_overwrite, 1)
         fn_lay.addLayout(fn_sub)
+        fol_vbox.addWidget(self.folder_naming_widget)
 
         self.lbl_folder_dest_preview = ElidedLabel("", Qt.TextElideMode.ElideMiddle)
         self.lbl_folder_dest_preview.setStyleSheet(f"color: {PALETTE['ink_secondary']};")
-        fn_lay.addWidget(self.lbl_folder_dest_preview)
-        fol_vbox.addWidget(self.folder_naming_widget)
+        fol_vbox.addWidget(self.lbl_folder_dest_preview)
         sh_lay.addWidget(self.folder_panel)
 
         self.chk_hw_encode = StyledCheckBox(
@@ -1334,6 +1353,16 @@ class MainWindow(QMainWindow):
 
     # ---------- Queue & Video Loading ----------
 
+    def _auto_load_same_dir_exif(self, video_path: Path) -> ExifMetadata | None:
+        try:
+            match = find_matching_sidecar_exif_file(video_path, search_dir=None)
+            if match is None:
+                return None
+            meta = read_exif_from_file(match)
+            return None if meta.is_empty() else meta
+        except Exception:
+            return None
+
     def _default_item_state(self, info: VideoInfo, thumb: QPixmap | None) -> QueueItemState:
         return QueueItemState(
             info=info,
@@ -1345,6 +1374,7 @@ class MainWindow(QMainWindow):
             framing_mode="none",
             polaroid_preset=None,
             aspect_key="orig",
+            custom_ratio=None,
             orientation="portrait" if info.height >= info.width else "landscape",
             audio_mode="speed_sync",
             bg_mode="blur" if self.btn_bg_blur.isChecked() else "solid",
@@ -1364,7 +1394,7 @@ class MainWindow(QMainWindow):
             video_max_edge=self.spin_custom_edge.value(),
             video_bitrate_mbps=float(self.slider_bitrate.value()),
             image_format=str(self.seg_img_fmt.currentKey() or "heic"),
-            exif_metadata=None,
+            exif_metadata=self._auto_load_same_dir_exif(info.path),
         )
 
     def _capture_active_state(self) -> None:
@@ -1378,6 +1408,7 @@ class MainWindow(QMainWindow):
         st.framing_mode = self._framing_mode
         st.polaroid_preset = self._active_polaroid
         st.aspect_key = self._active_aspect_key
+        st.custom_ratio = self._custom_ratio
         st.orientation = self._orientation
         st.audio_mode = str(self.seg_audio.currentKey() or "speed_sync")
         st.bg_mode = "blur" if self.btn_bg_blur.isChecked() else "solid"
@@ -1434,17 +1465,25 @@ class MainWindow(QMainWindow):
             self.spin_end.setValue(st.end_frame)
             self.spin_key_frame.setValue(st.key_frame_index)
 
-            self._framing_mode = st.framing_mode
-            self.seg_framing_mode.setCurrentKey(st.framing_mode)
+            self._framing_mode = st.framing_mode if st.framing_mode in ("none", "crop") else "none"
+            self.seg_framing_mode.setCurrentKey(self._framing_mode)
             self._active_aspect_key = st.aspect_key
+            self._custom_ratio = st.custom_ratio
             self._orientation = st.orientation
             self.seg_orientation.setCurrentKey(st.orientation)
             self._update_ratio_button_labels()
             if st.aspect_key in self._aspect_buttons:
                 self._aspect_buttons[st.aspect_key].setChecked(True)
+            else:
+                self.aspect_btn_group.setExclusive(False)
+                for ab in self._aspect_buttons.values():
+                    ab.setChecked(False)
+                self.aspect_btn_group.setExclusive(True)
             self._active_polaroid = st.polaroid_preset
-            for k, pb in self._polaroid_buttons.items():
-                pb.setChecked(k == st.polaroid_preset)
+            if st.polaroid_preset and st.polaroid_preset in self._polaroid_buttons:
+                self._polaroid_buttons[st.polaroid_preset].setChecked(True)
+            elif "__none__" in self._polaroid_buttons:
+                self._polaroid_buttons["__none__"].setChecked(True)
 
             self.seg_audio.setCurrentKey(st.audio_mode)
             self.seg_simple_audio.setCurrentKey("mute" if st.audio_mode == "mute" else "keep")
@@ -1604,11 +1643,13 @@ class MainWindow(QMainWindow):
             st.image_format = src.image_format
             st.exif_metadata = src.exif_metadata.clone() if src.exif_metadata else None
             if src.polaroid_preset:
-                st.framing_mode = "polaroid"
                 st.polaroid_preset = src.polaroid_preset
                 st.crop, st.padding = compute_polaroid_layout(
                     src.polaroid_preset, st.info.width, st.info.height
                 )
+            else:
+                st.polaroid_preset = None
+                st.padding = FramePadding()
         self.lbl_status.setText(f"已将当前参数同步至全部 {len(self._queue)} 个视频")
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
@@ -1812,13 +1853,13 @@ class MainWindow(QMainWindow):
         self.timeline.configure(self._video_info.nb_frames, start, end, self._current_frame, kf)
         self._update_summary()
 
-    # ---------- Streamlined 3-Way Framing, Orientation & Alignment ----------
+    # ---------- Composable Framing, Polaroid, Orientation & Alignment ----------
 
     def _sync_framing_visibility(self) -> None:
         is_crop = self._framing_mode == "crop"
-        is_pol = self._framing_mode == "polaroid"
+        is_pol = self._active_polaroid is not None
         self.crop_subpanel.setVisible(is_crop)
-        self.polaroid_subpanel.setVisible(is_pol)
+        self.polaroid_subpanel.setVisible(True)
 
         is_oob = False
         if self._video_info is not None:
@@ -1828,22 +1869,16 @@ class MainWindow(QMainWindow):
     def _on_framing_mode_changed(self, mode: str) -> None:
         if self._syncing_ui:
             return
-        self._framing_mode = mode if mode in ("none", "crop", "polaroid") else "none"
+        self._framing_mode = "crop" if mode == "crop" else "none"
         if self._framing_mode == "none":
             self._clear_polaroid_selection()
             self.btn_crop_toggle.setChecked(False)
             self.preview.set_crop_editing(False)
             if self._video_info is not None:
                 self.preview.set_crop(CropRect(0, 0, self._video_info.width, self._video_info.height), emit=True)
-        elif self._framing_mode == "crop":
-            self._clear_polaroid_selection()
+        else:
             self.btn_crop_toggle.setChecked(False)
             self.preview.set_crop_editing(True)
-        elif self._framing_mode == "polaroid":
-            self.btn_crop_toggle.setChecked(False)
-            self.preview.set_crop_editing(False)
-            if self._active_polaroid is None:
-                self._apply_polaroid_preset("mini")
         self._sync_framing_visibility()
         self._refresh_canvas_res_label()
         self._update_size_estimate()
@@ -1852,6 +1887,13 @@ class MainWindow(QMainWindow):
         if self._framing_mode == "crop":
             self.preview.set_crop_editing(not hide_box)
         self.btn_crop_toggle.setText("✏ 显示裁切框" if hide_box else "👁 隐藏框线预览")
+
+    def _on_preview_crop_editing_changed(self, editing: bool) -> None:
+        hide_box = not editing
+        self.btn_crop_toggle.blockSignals(True)
+        self.btn_crop_toggle.setChecked(hide_box)
+        self.btn_crop_toggle.setText("✏ 显示裁切框" if hide_box else "👁 隐藏框线预览")
+        self.btn_crop_toggle.blockSignals(False)
 
     def _on_zoom_changed(self, zoom: float) -> None:
         pct = int(round(zoom * 100))
@@ -1867,7 +1909,8 @@ class MainWindow(QMainWindow):
         tw = c.w + pad.left + pad.right
         th = c.h + pad.top + pad.bottom
         if self._active_polaroid and not pad.is_zero():
-            tag = f" ({POLAROID_PRESETS[self._active_polaroid].label})"
+            spec = POLAROID_PRESETS.get(self._active_polaroid)
+            tag = f" ({spec.label})" if spec is not None else " (拍立得套框)"
         elif c.is_out_of_bounds(self._video_info.width, self._video_info.height) or not pad.is_zero():
             tag = " (外扩)"
         else:
@@ -1893,8 +1936,11 @@ class MainWindow(QMainWindow):
 
     def _clear_polaroid_selection(self) -> None:
         self._active_polaroid = None
-        for pb in self._polaroid_buttons.values():
-            pb.setChecked(False)
+        if "__none__" in self._polaroid_buttons:
+            self._polaroid_buttons["__none__"].setChecked(True)
+        else:
+            for pb in self._polaroid_buttons.values():
+                pb.setChecked(False)
         self.preview.set_padding(FramePadding())
 
     def _update_ratio_button_labels(self) -> None:
@@ -1932,6 +1978,7 @@ class MainWindow(QMainWindow):
 
     def _on_aspect_button_clicked(self, key: str) -> None:
         self._active_aspect_key = key
+        self._custom_ratio = None
         self._clear_polaroid_selection()
         fit_mode = str(self.seg_fit_mode.currentKey() or "inside")
         self._reapply_current_aspect(fit_mode)
@@ -1941,17 +1988,26 @@ class MainWindow(QMainWindow):
             return
         self._clear_polaroid_selection()
         self._ensure_crop_box_visible()
-        ratio = None
-        for _lbl, k, r in CANONICAL_RATIOS:
-            if k == self._active_aspect_key:
-                if r is None:
-                    src_r = self._video_info.width / self._video_info.height
-                    ratio = max(src_r, 1.0 / src_r) if self._orientation == "landscape" else min(src_r, 1.0 / src_r)
-                elif r < 0:
-                    ratio = None
-                else:
-                    ratio = (1.0 / r) if (self._orientation == "landscape" and r < 1.0) else r
-                break
+        ratio: float | None = None
+        if self._active_aspect_key == "custom" and self._custom_ratio is not None:
+            r = self._custom_ratio
+            if self._orientation == "landscape" and r < 1.0:
+                ratio = 1.0 / r
+            elif self._orientation == "portrait" and r > 1.0:
+                ratio = 1.0 / r
+            else:
+                ratio = r
+        else:
+            for _lbl, k, r in CANONICAL_RATIOS:
+                if k == self._active_aspect_key:
+                    if r is None:
+                        src_r = self._video_info.width / self._video_info.height
+                        ratio = max(src_r, 1.0 / src_r) if self._orientation == "landscape" else min(src_r, 1.0 / src_r)
+                    elif r < 0:
+                        ratio = None
+                    else:
+                        ratio = (1.0 / r) if (self._orientation == "landscape" and r < 1.0) else r
+                    break
         self.preview.apply_aspect_fit(ratio, mode=fit_mode)
         self._refresh_canvas_res_label()
         self._update_size_estimate()
@@ -1972,6 +2028,16 @@ class MainWindow(QMainWindow):
         if w_val <= 0 or h_val <= 0:
             return
         ratio = w_val / h_val
+        self._active_aspect_key = "custom"
+        self._custom_ratio = ratio
+        if w_val != h_val:
+            self._orientation = "landscape" if w_val > h_val else "portrait"
+            self.seg_orientation.setCurrentKey(self._orientation)
+            self._update_ratio_button_labels()
+        self.aspect_btn_group.setExclusive(False)
+        for ab in self._aspect_buttons.values():
+            ab.setChecked(False)
+        self.aspect_btn_group.setExclusive(True)
         self._clear_polaroid_selection()
         self._ensure_crop_box_visible()
         fit_mode = str(self.seg_fit_mode.currentKey() or "inside")
@@ -1985,20 +2051,26 @@ class MainWindow(QMainWindow):
         self._ensure_crop_box_visible()
         self.preview.align_crop(mode)
 
-    def _apply_polaroid_preset(self, preset_key: str) -> None:
+    def _apply_polaroid_preset(self, preset_key: str | None) -> None:
+        if preset_key is None:
+            self._clear_polaroid_selection()
+            self._sync_framing_visibility()
+            self._refresh_canvas_res_label()
+            self._update_size_estimate()
+            return
         if self._video_info is None:
             return
-        self._framing_mode = "polaroid"
-        self.seg_framing_mode.setCurrentKey("polaroid")
         self._active_polaroid = preset_key
-        for k, pb in self._polaroid_buttons.items():
-            pb.setChecked(k == preset_key)
+        if preset_key in self._polaroid_buttons:
+            self._polaroid_buttons[preset_key].setChecked(True)
 
+        preserve = self._framing_mode == "crop"
         crop, pad = compute_polaroid_layout(
             preset_key,
             self._video_info.width,
             self._video_info.height,
             current_crop=self.preview.get_crop(),
+            preserve_crop_scale=preserve,
         )
         if self.btn_bg_blur.isChecked():
             self._set_bg_color("#FFFFFF", self.btn_bg_white)
@@ -2026,6 +2098,7 @@ class MainWindow(QMainWindow):
         self._framing_mode = "none"
         self.seg_framing_mode.setCurrentKey("none")
         self._active_aspect_key = "orig"
+        self._custom_ratio = None
         self._aspect_buttons["orig"].setChecked(True)
         self._clear_polaroid_selection()
         self.preview.set_crop_editing(False)

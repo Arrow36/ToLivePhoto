@@ -25,6 +25,7 @@ IPHONE_LIVE_BITRATE_MBPS: float = 8.0
 class PolaroidSpec:
     key: str
     label: str
+    ratio_label: str
     sheet_w_mm: float
     sheet_h_mm: float
     img_w_mm: float
@@ -39,6 +40,7 @@ POLAROID_PRESETS: dict[str, PolaroidSpec] = {
     "mini": PolaroidSpec(
         key="mini",
         label="Instax Mini",
+        ratio_label="3:4",
         sheet_w_mm=54.0,
         sheet_h_mm=86.0,
         img_w_mm=46.0,
@@ -51,6 +53,7 @@ POLAROID_PRESETS: dict[str, PolaroidSpec] = {
     "square": PolaroidSpec(
         key="square",
         label="Instax Square",
+        ratio_label="1:1",
         sheet_w_mm=72.0,
         sheet_h_mm=86.0,
         img_w_mm=62.0,
@@ -63,6 +66,7 @@ POLAROID_PRESETS: dict[str, PolaroidSpec] = {
     "wide": PolaroidSpec(
         key="wide",
         label="Instax Wide",
+        ratio_label="16:10",
         sheet_w_mm=108.0,
         sheet_h_mm=86.0,
         img_w_mm=99.0,
@@ -75,6 +79,7 @@ POLAROID_PRESETS: dict[str, PolaroidSpec] = {
     "polaroid_600": PolaroidSpec(
         key="polaroid_600",
         label="Polaroid 600",
+        ratio_label="1:1",
         sheet_w_mm=88.0,
         sheet_h_mm=107.0,
         img_w_mm=79.0,
@@ -180,37 +185,73 @@ class FramePadding:
         )
 
 
+def compute_custom_polaroid_padding(crop: CropRect) -> FramePadding:
+    """Compute balanced Polaroid-style margins around an arbitrary user-cropped frame."""
+    cw = max(2, int(crop.w))
+    ch = max(2, int(crop.h))
+    side = max(16, int(round(min(cw, ch) * 0.08)))
+    top = side
+    bottom = max(side * 2, int(round(ch * 0.24)))
+    return FramePadding(left=side, top=top, right=side, bottom=bottom).normalized()
+
+
 def compute_polaroid_layout(
     preset_key: str,
     video_w: int,
     video_h: int,
     current_crop: CropRect | None = None,
+    preserve_crop_scale: bool = False,
 ) -> tuple[CropRect, FramePadding]:
     """Inner-crop video to film image window aspect ratio and compute asymmetric outer film margins."""
-    spec = POLAROID_PRESETS[preset_key]
     vw = max(2, (int(video_w) // 2) * 2)
     vh = max(2, (int(video_h) // 2) * 2)
+
+    if preset_key == "custom_crop":
+        base = current_crop if current_crop is not None else CropRect(0, 0, vw, vh)
+        crop = base.normalized(vw, vh, allow_out_of_bounds=True)
+        return crop, compute_custom_polaroid_padding(crop)
+
+    spec = POLAROID_PRESETS[preset_key]
     img_ratio = spec.img_w_mm / spec.img_h_mm
-    vid_ratio = vw / vh
 
-    if vid_ratio >= img_ratio:
-        ch = vh
-        cw = int(round(ch * img_ratio))
-    else:
-        cw = vw
-        ch = int(round(cw / img_ratio))
-
-    cx = vw / 2.0
-    cy = vh / 2.0
-    if current_crop is not None and not current_crop.is_out_of_bounds(vw, vh):
+    if preserve_crop_scale and current_crop is not None:
+        cur_w = max(2, int(current_crop.w))
+        cur_h = max(2, int(current_crop.h))
+        if cur_w / cur_h >= img_ratio:
+            ch = cur_h
+            cw = max(2, int(round(ch * img_ratio)))
+        else:
+            cw = cur_w
+            ch = max(2, int(round(cw / img_ratio)))
         cx = current_crop.x + current_crop.w / 2.0
         cy = current_crop.y + current_crop.h / 2.0
+        x = int(round(cx - cw / 2.0))
+        y = int(round(cy - ch / 2.0))
+        allow_oob = current_crop.is_out_of_bounds(vw, vh)
+        if not allow_oob:
+            x = max(0, min(x, vw - cw))
+            y = max(0, min(y, vh - ch))
+        crop = CropRect(x=x, y=y, w=cw, h=ch).normalized(vw, vh, allow_out_of_bounds=allow_oob)
+    else:
+        vid_ratio = vw / vh
+        if vid_ratio >= img_ratio:
+            ch = vh
+            cw = int(round(ch * img_ratio))
+        else:
+            cw = vw
+            ch = int(round(cw / img_ratio))
 
-    x = int(round(cx - cw / 2.0))
-    y = int(round(cy - ch / 2.0))
-    x = max(0, min(x, vw - cw))
-    y = max(0, min(y, vh - ch))
-    crop = CropRect(x=x, y=y, w=cw, h=ch).normalized(vw, vh, allow_out_of_bounds=False)
+        cx = vw / 2.0
+        cy = vh / 2.0
+        if current_crop is not None and not current_crop.is_out_of_bounds(vw, vh):
+            cx = current_crop.x + current_crop.w / 2.0
+            cy = current_crop.y + current_crop.h / 2.0
+
+        x = int(round(cx - cw / 2.0))
+        y = int(round(cy - ch / 2.0))
+        x = max(0, min(x, vw - cw))
+        y = max(0, min(y, vh - ch))
+        crop = CropRect(x=x, y=y, w=cw, h=ch).normalized(vw, vh, allow_out_of_bounds=False)
 
     px_per_mm = crop.w / spec.img_w_mm
     pad = FramePadding(
