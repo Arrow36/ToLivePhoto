@@ -12,10 +12,13 @@ AudioRetimeMode = Literal["speed_sync", "trim_fade"]
 KeyPhotoSource = Literal["video_frame", "external_image"]
 ExternalKeyAspectMode = Literal["crop_fill", "pad_fit", "match_cover_aspect"]
 ExportMode = Literal["usb_dcim", "folder"]
+FolderNamingMode = Literal["suffix", "original", "prefix_seq", "custom"]
 RifeMode = Literal["target_fps", "multiplier"]
 RifePlaybackPolicy = Literal["keep_duration", "custom_fps"]
 ImageFormat = Literal["heic", "jpg"]
 BgMode = Literal["blur", "solid"]
+
+IPHONE_LIVE_BITRATE_MBPS: float = 8.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -242,7 +245,7 @@ class ConversionJob:
     custom_fps: float = 30.0
     rife_mode: RifeMode = "target_fps"
     rife_multiplier: int = 2
-    rife_model: str = "rife-v4.25"
+    rife_model: str = "rife-v4.6"
     rife_gpu_id: int = 0
     rife_playback_policy: RifePlaybackPolicy = "keep_duration"
     audio_retime_mode: AudioRetimeMode = "speed_sync"
@@ -257,6 +260,11 @@ class ConversionJob:
     dcf_prefix: str = "IMG_"
     dcf_number: int | None = None
     folder_stem: str | None = None
+    folder_naming_mode: FolderNamingMode = "suffix"
+    folder_suffix: str = "_2live"
+    folder_custom_prefix: str = "LIVE_"
+    folder_seq_number: int = 1
+    avoid_overwrite: bool = True
     also_pack_livp: bool = False
     image_format: ImageFormat = "heic"
     video_max_edge: int = 0
@@ -375,3 +383,70 @@ def estimate_output_size_mb(info: VideoInfo, job: ConversionJob, summary: Timeli
     audio_mb = (0.024 * dur) if (not job.mute and info.has_audio) else 0.0
     mov_mb = max(0.15, video_mb + audio_mb + 0.05)
     return img_mb, mov_mb, img_mb + mov_mb
+
+
+def _sanitize_stem(raw: str, fallback: str) -> str:
+    cleaned = "".join(c for c in raw.strip() if c not in '<>:"/\\|?*').strip()
+    return cleaned or fallback
+
+
+def build_folder_stem(source_stem: str, job: ConversionJob) -> str:
+    """Build target filename stem for folder export from naming mode."""
+    if job.folder_stem is not None:
+        return _sanitize_stem(job.folder_stem, "LivePhoto")
+    if job.folder_naming_mode == "original":
+        return _sanitize_stem(source_stem, "LivePhoto")
+    if job.folder_naming_mode == "prefix_seq":
+        pfx = _sanitize_stem(job.folder_custom_prefix, "LIVE_")
+        return f"{pfx}{max(1, int(job.folder_seq_number)):04d}"
+    if job.folder_naming_mode == "custom":
+        return _sanitize_stem(job.folder_custom_prefix, source_stem or "LivePhoto")
+    sfx = _sanitize_stem(job.folder_suffix, "_2live")
+    return f"{_sanitize_stem(source_stem, 'LivePhoto')}{sfx}"
+
+
+def resolve_folder_output_paths(
+    out_dir: Path,
+    source_stem: str,
+    image_ext: str,
+    job: ConversionJob,
+) -> tuple[Path, Path, Path | None, str]:
+    """Resolve collision-safe folder export paths for HEIC/JPG, MOV, and optional LIVP."""
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    ext = image_ext.upper().lstrip(".")
+    base_stem = build_folder_stem(source_stem, job)
+    stem = base_stem
+
+    if job.avoid_overwrite and job.folder_stem is None:
+        if job.folder_naming_mode == "prefix_seq":
+            pfx = _sanitize_stem(job.folder_custom_prefix, "LIVE_")
+            seq = max(1, int(job.folder_seq_number))
+            while (
+                (out_dir / f"{pfx}{seq:04d}.{ext}").exists()
+                or (out_dir / f"{pfx}{seq:04d}.MOV").exists()
+            ):
+                seq += 1
+            stem = f"{pfx}{seq:04d}"
+        else:
+            counter = 1
+            while (out_dir / f"{stem}.{ext}").exists() or (out_dir / f"{stem}.MOV").exists():
+                stem = f"{base_stem}_{counter}"
+                counter += 1
+
+    img_dest = out_dir / f"{stem}.{ext}"
+    mov_dest = out_dir / f"{stem}.MOV"
+    livp_dest = (out_dir / f"{stem}.livp") if job.also_pack_livp else None
+    return img_dest, mov_dest, livp_dest, stem
+
+
+def preview_output_filename(info: VideoInfo, job: ConversionJob) -> str:
+    """Return human-readable preview of target output filename pair."""
+    ext = "HEIC" if job.image_format == "heic" else "JPG"
+    if job.export_mode == "usb_dcim":
+        num = job.dcf_number if job.dcf_number is not None else 1
+        pfx = (job.dcf_prefix or "IMG_").upper()[:4].ljust(4, "_")
+        return f"DCIM/100APPLE/{pfx}{num:04d}.{ext} + .MOV"
+    stem = build_folder_stem(info.path.stem, job)
+    return f"{stem}.{ext} + .MOV"
+

@@ -42,7 +42,7 @@ class ConversionWorker(QThread):
 
 
 class BatchConversionWorker(QThread):
-    """Process a queue of ConversionJobs sequentially with auto-incrementing DCF numbers."""
+    """Process a queue of ConversionJobs sequentially with auto-incrementing DCF/folder numbers."""
 
     itemStarted = Signal(int, int, str)
     progress = Signal(int, str)
@@ -64,12 +64,15 @@ class BatchConversionWorker(QThread):
         results: list[ConversionResult] = []
         total = len(self._jobs)
         next_dcf: int | None = None
+        next_seq: int | None = None
         try:
             for idx, job in enumerate(self._jobs):
                 if self._cancel_requested:
-                    raise ConversionCancelled("用户已取消批量转换")
+                    raise ConversionCancelled("用户已取消转换")
                 if job.export_mode == "usb_dcim" and next_dcf is not None:
                     job.dcf_number = next_dcf
+                elif job.export_mode == "folder" and job.folder_naming_mode == "prefix_seq" and next_seq is not None:
+                    job.folder_seq_number = next_seq
 
                 self.itemStarted.emit(idx, total, job.video_path.name)
 
@@ -86,6 +89,8 @@ class BatchConversionWorker(QThread):
                 self.itemSucceeded.emit(idx, res)
                 if res.used_dcf_number is not None and self._auto_inc_dcf:
                     next_dcf = (res.used_dcf_number % 9999) + 1
+                if job.export_mode == "folder" and job.folder_naming_mode == "prefix_seq":
+                    next_seq = job.folder_seq_number + 1
 
             self.allSucceeded.emit(results)
         except ConversionCancelled:

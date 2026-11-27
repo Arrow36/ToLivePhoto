@@ -23,6 +23,7 @@ from .models import (
     TimelineSummary,
     VideoInfo,
     compute_timeline_summary,
+    resolve_folder_output_paths,
 )
 from .probe import probe_video
 from .tools import find_ffmpeg, has_nvenc, run_command
@@ -148,6 +149,8 @@ def _prepare_cover_image(
             [
                 str(ffmpeg),
                 "-y",
+                "-hwaccel",
+                "auto",
                 "-i",
                 str(info.path),
                 "-vf",
@@ -438,6 +441,8 @@ def _render_intermediate_mov(
             [
                 str(ffmpeg),
                 "-y",
+                "-hwaccel",
+                "auto",
                 "-i",
                 str(info.path),
                 "-filter_complex",
@@ -446,7 +451,11 @@ def _render_intermediate_mov(
                 "[vout]",
                 "-fps_mode",
                 "passthrough",
-                str(in_frames / "%08d.png"),
+                "-q:v",
+                "1",
+                "-pix_fmt",
+                "yuvj420p",
+                str(in_frames / "%08d.jpg"),
             ]
         )
 
@@ -461,6 +470,7 @@ def _render_intermediate_mov(
             width=out_w,
             height=out_h,
             gpu_id=job.rife_gpu_id,
+            frame_ext="jpg",
             progress_cb=progress_cb,
             cancel_cb=cancel_cb,
         )
@@ -473,7 +483,7 @@ def _render_intermediate_mov(
             "-framerate",
             f"{summary.output_fps:.6f}",
             "-i",
-            str(out_frames / "%08d.png"),
+            str(out_frames / "%08d.jpg"),
         ]
         if audio_path:
             cmd += ["-i", str(audio_path), "-map", "0:v:0", "-map", "1:a:0", "-c:a", "copy"]
@@ -519,7 +529,7 @@ def _render_intermediate_mov(
             f"{spatial.replace('[vspatial]', '[vout]')}"
         )
 
-    cmd = [str(ffmpeg), "-y", "-i", str(info.path)]
+    cmd = [str(ffmpeg), "-y", "-hwaccel", "auto", "-i", str(info.path)]
     if audio_path:
         cmd += ["-i", str(audio_path), "-filter_complex", fc, "-map", "[vout]", "-map", "1:a:0", "-c:a", "copy"]
     else:
@@ -613,12 +623,12 @@ def run_conversion(
             )
             livp_dest: Path | None = None
         else:
-            out_dir = Path(job.output_root)
-            out_dir.mkdir(parents=True, exist_ok=True)
-            stem = (job.folder_stem or info.path.stem).strip() or "LivePhoto"
-            img_dest = out_dir / f"{stem}.{ext}"
-            mov_dest = out_dir / f"{stem}.MOV"
-            livp_dest = (out_dir / f"{stem}.livp") if job.also_pack_livp else None
+            img_dest, mov_dest, livp_dest, _stem = resolve_folder_output_paths(
+                out_dir=Path(job.output_root),
+                source_stem=info.path.stem,
+                image_ext=ext,
+                job=job,
+            )
 
         shutil.copy2(staged_img, img_dest)
         shutil.copy2(staged_mov, mov_dest)

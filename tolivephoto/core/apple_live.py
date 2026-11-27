@@ -136,24 +136,27 @@ def build_apple_exif_bytes(
     dt_str = dt.strftime("%Y:%m:%d %H:%M:%S")
     dt_bytes = dt_str.encode("ascii") + b"\x00"
 
-    make_str = (custom_exif.make.strip() if custom_exif and custom_exif.make.strip() else DEVICE_MAKE)
-    model_str = (custom_exif.model.strip() if custom_exif and custom_exif.model.strip() else DEVICE_MODEL)
-    sw_str = (custom_exif.software.strip() if custom_exif and custom_exif.software.strip() else DEVICE_SOFTWARE)
+    make_str = custom_exif.make.strip() if custom_exif else ""
+    model_str = custom_exif.model.strip() if custom_exif else ""
+    sw_str = custom_exif.software.strip() if custom_exif else ""
 
-    make_b = _ascii_bytes(make_str)
-    model_b = _ascii_bytes(model_str)
-    sw_b = _ascii_bytes(sw_str)
     note_b = apple_maker_note(asset_id)
 
     has_gps = bool(custom_exif and custom_exif.gps_lat is not None and custom_exif.gps_lon is not None)
 
     ifd0_base: list[tuple[int, int, int, bytes]] = [
-        (0x010F, 2, len(make_b), make_b),
-        (0x0110, 2, len(model_b), model_b),
         (0x0112, 3, 1, struct.pack(">H", 1)),
-        (0x0131, 2, len(sw_b), sw_b),
         (0x0132, 2, len(dt_bytes), dt_bytes),
     ]
+    if make_str:
+        make_b = _ascii_bytes(make_str)
+        ifd0_base.append((0x010F, 2, len(make_b), make_b))
+    if model_str:
+        model_b = _ascii_bytes(model_str)
+        ifd0_base.append((0x0110, 2, len(model_b), model_b))
+    if sw_str:
+        sw_b = _ascii_bytes(sw_str)
+        ifd0_base.append((0x0131, 2, len(sw_b), sw_b))
     if custom_exif and custom_exif.artist.strip():
         art_b = _ascii_bytes(custom_exif.artist.strip())
         ifd0_base.append((0x013B, 2, len(art_b), art_b))
@@ -372,21 +375,24 @@ def _quicktime_meta_atom(
     else:
         creation_iso = dt_to_use.astimezone().strftime("%Y-%m-%dT%H:%M:%S%z")
 
-    make_str = custom_exif.make.strip() if custom_exif and custom_exif.make.strip() else DEVICE_MAKE
-    model_str = custom_exif.model.strip() if custom_exif and custom_exif.model.strip() else DEVICE_MODEL
-    sw_str = custom_exif.software.strip() if custom_exif and custom_exif.software.strip() else DEVICE_SOFTWARE
+    make_str = custom_exif.make.strip() if custom_exif else ""
+    model_str = custom_exif.model.strip() if custom_exif else ""
+    sw_str = custom_exif.software.strip() if custom_exif else ""
 
     entries: list[tuple[bytes, int, bytes]] = [
         (b"com.apple.quicktime.live-photo.auto", 22, b"\x01"),
         (b"com.apple.quicktime.live-photo.vitality-score", 23, struct.pack(">f", 0.95)),
         (b"com.apple.quicktime.live-photo.vitality-scoring-version", 21, struct.pack(">q", 4)),
-        (b"com.apple.quicktime.make", 1, make_str.encode("utf-8")),
-        (b"com.apple.quicktime.model", 1, model_str.encode("utf-8")),
-        (b"com.apple.quicktime.software", 1, sw_str.encode("utf-8")),
         (b"com.apple.quicktime.creationdate", 1, creation_iso.encode("utf-8")),
         (CONTENT_KEY, 1, identifier.encode("ascii")),
         (STILL_TIME_KEY, 23, struct.pack(">f", float(max(0.0, still_time)))),
     ]
+    if make_str:
+        entries.append((b"com.apple.quicktime.make", 1, make_str.encode("utf-8")))
+    if model_str:
+        entries.append((b"com.apple.quicktime.model", 1, model_str.encode("utf-8")))
+    if sw_str:
+        entries.append((b"com.apple.quicktime.software", 1, sw_str.encode("utf-8")))
     if custom_exif and custom_exif.gps_lat is not None and custom_exif.gps_lon is not None:
         iso6709 = f"{custom_exif.gps_lat:+08.4f}{custom_exif.gps_lon:+09.4f}/".encode("ascii")
         entries.append((b"com.apple.quicktime.location.ISO6709", 1, iso6709))

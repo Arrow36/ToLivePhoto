@@ -1,4 +1,4 @@
-"""Offscreen GUI smoke test for ToLivePhoto v2.2 unified Simple/Advanced studio UI, thumbnail queue, and zero-dropdowns."""
+"""Offscreen GUI smoke test for ToLivePhoto v2.3 streamlined framing, dual info bar, blank EXIF, & fixed simple bitrate."""
 from __future__ import annotations
 
 import os
@@ -8,12 +8,12 @@ from PySide6.QtCore import QEvent, QPointF, Qt
 from PySide6.QtGui import QMouseEvent, QWheelEvent
 from PySide6.QtWidgets import QApplication, QComboBox
 
-from tolivephoto.core.models import CropRect
+from tolivephoto.core.models import IPHONE_LIVE_BITRATE_MBPS, CropRect
 from tolivephoto.ui.main_window import FPS_PRESET_VALUES, LONG_EDGE_PRESETS, MainWindow
 from tolivephoto.ui.theme import ensure_bytedance_font
 
 
-def test_tolivephoto_gui_v22_offscreen(tmp_path: Path) -> None:
+def test_tolivephoto_gui_v23_offscreen(tmp_path: Path) -> None:
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     app = QApplication.instance() or QApplication([])
     font_family = ensure_bytedance_font(app)
@@ -24,25 +24,45 @@ def test_tolivephoto_gui_v22_offscreen(tmp_path: Path) -> None:
     win.show()
     app.processEvents()
 
-    # 1. Only output-directory USB selector is a QComboBox (all other selectors are buttons)
-    combos = win.findChildren(QComboBox)
-    assert combos == [win.combo_usb]
+    # 1. Only output-directory USB selector is a QComboBox
+    assert win.findChildren(QComboBox) == [win.combo_usb]
 
-    # 2. Default Simple Mode vs Advanced Mode switching
+    # 2. No locate button; dual info bar present; blank default EXIF
+    assert not hasattr(win, "btn_locate_source")
+    assert "空白" in win.lbl_exif_summary.text()
+
+    # 3. Default Simple Mode uses fixed iPhone bitrate (8 Mbps) & _2live naming
     assert win.simple_container.isVisible()
     assert not win.advanced_container.isVisible()
+    if sample.is_file():
+        job_simple = win._build_job()
+        assert job_simple.video_bitrate_mbps == IPHONE_LIVE_BITRATE_MBPS
+        assert "_2live" in win.lbl_out_file_info.text()
+        assert str(sample.parent) in win.lbl_full_dir_info.text()
+        assert sample.name in win.lbl_full_dir_info.text()
+        assert "输出规格:" in win.lbl_out_spec_info.text()
+
+    # 4. Switch to Advanced Mode & verify zero overflow
     win.set_ui_mode("advanced")
     app.processEvents()
     assert not win.simple_container.isVisible()
     assert win.advanced_container.isVisible()
-
-    # 3. Crop button lives inside the unified studio_card
     assert win.studio_card.isAncestorOf(win.btn_crop_toggle)
-
-    # 4. Zero-overflow layout assertion on unified studio card
     assert win.studio_card.minimumSizeHint().width() <= 490
 
-    # 5. Defaults check
+    # 5. Key Photo: selecting video frame hides external image container
+    win.seg_key_source.setCurrentKey("video_frame")
+    win._on_key_source_changed()
+    assert win.video_key_row_widget.isVisible()
+    assert not win.ext_key_container.isVisible()
+    win.seg_key_source.setCurrentKey("external_image")
+    win._on_key_source_changed()
+    assert not win.video_key_row_widget.isVisible()
+    assert win.ext_key_container.isVisible()
+    win.seg_key_source.setCurrentKey("video_frame")
+    win._on_key_source_changed()
+
+    # 6. Defaults check
     assert "ToLivePhoto" in win.windowTitle()
     assert win.rb_keep.isChecked()
     assert win.spin_custom_fps.value() == 30.0
@@ -50,39 +70,20 @@ def test_tolivephoto_gui_v22_offscreen(tmp_path: Path) -> None:
     assert list(LONG_EDGE_PRESETS) == [0, 2160, 1440, 1080, 720]
     assert list(FPS_PRESET_VALUES) == [24, 25, 30, 60]
 
-    # 6. Crop box hidden by default until toggled
-    assert not win.btn_crop_toggle.isChecked()
+    # 7. Unified 3-way framing: crop mode turns on crop_editing automatically
     assert not win.preview.is_crop_editing()
-    win.btn_crop_toggle.setChecked(True)
+    win._on_framing_mode_changed("crop")
     assert win.preview.is_crop_editing()
-
-    # 7. Flat background buttons & bitrate slider
-    assert win.btn_bg_blur.isChecked()
-    win.slider_bitrate.setValue(32)
-    assert "32 Mbps" in win.lbl_bitrate_val.text()
+    assert win.crop_subpanel.isVisible()
 
     if sample.is_file():
-        # 8. Bottom video info bar shows full directory path & filename
-        assert str(sample.parent) in win.lbl_full_dir_info.text()
-        assert sample.name in win.lbl_full_dir_info.text()
+        # 8. Live scaled resolution spec beside custom px
+        win.spin_custom_edge.setValue(1440)
+        assert "960×1440" in win.lbl_scaled_res_spec.text()
+        win.spin_custom_edge.setValue(0)
+        assert "2160×3240" in win.lbl_scaled_res_spec.text()
 
-        # 9. Summary uses X秒Y帧 with no decimal point
-        assert "秒" in win.lbl_summary.text() and "帧" in win.lbl_summary.text()
-        assert "预计" in win.lbl_est_size.text()
-
-        # 10. Simple Mode FPS presets update job cleanly
-        win.set_ui_mode("simple")
-        win._on_simple_fps_changed("raw_30")
-        assert win._build_job().fps_mode == "raw_retime"
-        assert win._build_job().custom_fps == 30.0
-        win._on_simple_fps_changed("rife_fast")
-        job_fast = win._build_job()
-        assert job_fast.fps_mode in ("rife_interpolate", "ffmpeg_minterpolate")
-        assert job_fast.custom_fps == 30.0
-        win._on_simple_fps_changed("keep_original")
-        win.set_ui_mode("advanced")
-
-        # 11. Colon-free dual ratio input, alignment, and orientation flip
+        # 9. Colon-free ratio, alignment, and unified orientation flip
         win.edit_ratio_w.setText("16")
         win.edit_ratio_h.setText("9")
         win._apply_manual_ratio()
@@ -102,18 +103,18 @@ def test_tolivephoto_gui_v22_offscreen(tmp_path: Path) -> None:
         win._on_orientation_changed("landscape")
         c_4_3 = win.preview.get_crop()
         assert c_4_3.w > c_4_3.h
+        assert win.preview.is_crop_editing()
 
-        # 12. Hold-to-compare & Polaroid & Double-click zoom
-        win.preview.set_compare_original(True)
-        assert win.preview.is_comparing_original()
-        win.preview.set_compare_original(False)
-
+        # 10. Polaroid & Reset
         win._apply_polaroid_preset("mini")
         pad = win.preview.get_padding()
         assert pad.bottom > pad.top > 0
+        assert win.bg_style_panel.isVisible()
         win._reset_crop()
         assert win.preview.get_padding().is_zero()
+        assert not win.preview.is_crop_editing()
 
+        # 11. Double-click zoom toggle
         dbl = QMouseEvent(
             QEvent.Type.MouseButtonDblClick,
             QPointF(win.preview.width() / 2.0, win.preview.height() / 2.0),
@@ -130,7 +131,6 @@ def test_tolivephoto_gui_v22_offscreen(tmp_path: Path) -> None:
         win.preview.set_crop(CropRect(-100, 0, 2360, 3240), emit=True)
         assert "外扩" in win.lbl_crop_res.text()
 
-    # 13. USB NoWheelComboBox ignores wheel events
     ev = QWheelEvent(
         QPointF(10, 10),
         QPointF(10, 10),

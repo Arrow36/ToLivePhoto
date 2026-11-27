@@ -39,7 +39,7 @@ class ExifMetadata:
     lens_model: str = ""
     software: str = ""
     datetime_original: str = ""  # YYYY:MM:DD HH:MM:SS
-    offset_time: str = "+08:00"
+    offset_time: str = ""
     exposure_time: str = ""  # e.g. "1/250" or "0.5"
     f_number: str = ""  # e.g. "5.6"
     iso: int | None = None
@@ -104,7 +104,7 @@ class ExifMetadata:
 
     def summary_text(self) -> str:
         if self.is_empty():
-            return "默认 Apple 实况信息"
+            return "空白 (不写入相机参数)"
         parts: list[str] = []
         cam = self.model.strip() or self.make.strip()
         if cam:

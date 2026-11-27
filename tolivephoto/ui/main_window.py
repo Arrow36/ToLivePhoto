@@ -1,4 +1,4 @@
-"""Main PySide6 desktop studio window for ToLivePhoto v2.2 (Unified Simple/Advanced Card, Thumbnail Queue, Zero Extra Dropdowns)."""
+"""Main PySide6 desktop studio window for ToLivePhoto v2.3 (Streamlined Crop, Dual Info Bar, Naming & Fixed Simple Bitrate)."""
 from __future__ import annotations
 
 import os
@@ -48,6 +48,7 @@ from ..core.exif_io import (
     read_exif_from_file,
 )
 from ..core.models import (
+    IPHONE_LIVE_BITRATE_MBPS,
     POLAROID_PRESETS,
     ConversionJob,
     CropRect,
@@ -59,8 +60,9 @@ from ..core.models import (
     estimate_output_size_mb,
     format_frames_as_sec_frames,
     format_sec_frames,
+    preview_output_filename,
 )
-from ..core.pipeline import ConversionResult
+from ..core.pipeline import ConversionResult, compute_scaled_video_dims
 from ..core.probe import probe_video
 from ..core.tools import find_rife, has_nvenc, list_available_rife_models, list_vulkan_gpus
 from ..core.usb_export import extract_4digit_seed, list_usb_drives, normalize_dcf_prefix
@@ -86,13 +88,12 @@ from .worker import BatchConversionWorker, ConversionWorker, RifeDownloadWorker
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v"}
 
 CANONICAL_RATIOS: list[tuple[str, str, float | None]] = [
-    ("原比例", "orig", None),
     ("自由", "free", -1.0),
+    ("原比例", "orig", None),
     ("1:1", "1:1", 1.0),
     ("2:3", "2:3", 2.0 / 3.0),
     ("3:4", "3:4", 3.0 / 4.0),
     ("9:16", "9:16", 9.0 / 16.0),
-    ("4:5", "4:5", 4.0 / 5.0),
 ]
 
 FPS_PRESET_VALUES = (24, 25, 30, 60)
@@ -107,21 +108,22 @@ class QueueItemState:
     end_frame: int
     crop: CropRect
     padding: FramePadding
+    framing_mode: str  # "none" | "crop" | "polaroid"
     polaroid_preset: str | None
     aspect_key: str
-    orientation: str  # "portrait" | "landscape"
-    audio_mode: str   # "speed_sync" | "trim_fade" | "mute"
-    bg_mode: str      # "blur" | "solid"
+    orientation: str   # "portrait" | "landscape"
+    audio_mode: str    # "speed_sync" | "trim_fade" | "mute"
+    bg_mode: str       # "blur" | "solid"
     bg_color: str
     bg_blur_sigma: int
-    fps_mode: str     # "keep_original" | "raw_retime" | "rife_interpolate"
-    rife_mode: str    # "target_fps" | "multiplier"
+    fps_mode: str      # "keep_original" | "raw_retime" | "rife_interpolate"
+    rife_mode: str     # "target_fps" | "multiplier"
     rife_multiplier: int
     rife_model: str
     rife_gpu_id: int
     rife_playback_policy: str
     custom_fps: float
-    key_source: str   # "video_frame" | "external_image"
+    key_source: str    # "video_frame" | "external_image"
     key_frame_index: int
     external_key_path: Path | None
     external_key_aspect_mode: str
@@ -132,7 +134,7 @@ class QueueItemState:
 
 
 class QueueThumbCard(QFrame):
-    """Clickable video queue item with 56x40 thumbnail, name, specs, and remove button."""
+    """Clickable video queue item with 48x40 thumbnail, name, specs, and remove button."""
 
     clicked = Signal(int)
     removeRequested = Signal(int)
@@ -216,6 +218,13 @@ def _divider() -> QFrame:
     return line
 
 
+def _v_divider() -> QFrame:
+    line = QFrame()
+    line.setFrameShape(QFrame.Shape.VLine)
+    line.setStyleSheet(f"color: {PALETTE['border_soft']};")
+    return line
+
+
 class MainWindow(QMainWindow):
     def __init__(self, initial_video: Path | None = None) -> None:
         super().__init__()
@@ -260,12 +269,16 @@ class MainWindow(QMainWindow):
         self._rife_models = list_available_rife_models()
 
         self._ui_mode = "simple"
+        self._framing_mode = "none"
         self._active_aspect_key = "orig"
         self._orientation = "portrait"
         self._active_polaroid: str | None = None
         self._selected_rife_mode = "target_fps"
         self._selected_rife_mult = 2
-        self._selected_rife_model = self._rife_models[0] if self._rife_models else "ffmpeg_minterpolate"
+        default_rife = "rife-v4.6" if "rife-v4.6" in self._rife_models else (
+            self._rife_models[0] if self._rife_models else "ffmpeg_minterpolate"
+        )
+        self._selected_rife_model = default_rife
         self._selected_rife_gpu = self._vulkan_gpus[0][0] if self._vulkan_gpus else 0
 
         self._fps_chip_buttons: list[tuple[int, QPushButton]] = []
@@ -356,7 +369,6 @@ class MainWindow(QMainWindow):
         left_layout.setContentsMargins(10, 8, 10, 8)
         left_layout.setSpacing(6)
 
-        # Stage top mini-bar (crop button moved to right studioCard!)
         stage_top = QHBoxLayout()
         stage_top.setSpacing(6)
         self.lbl_crop_res = QLabel("画布: -")
@@ -443,32 +455,40 @@ class MainWindow(QMainWindow):
         playhead_row.addWidget(lbl_keys)
         left_layout.addLayout(playhead_row)
 
-        # ---- BOTTOM VIDEO INFO (FULL DIRECTORY) & IMPORT BAR ----
+        # ---- BOTTOM DUAL VIDEO INFO BAR (SOURCE LEFT + OUTPUT RIGHT + IMPORT) ----
         self.video_info_bar = QFrame()
         self.video_info_bar.setObjectName("videoInfoBar")
         vib_lay = QHBoxLayout(self.video_info_bar)
         vib_lay.setContentsMargins(10, 7, 10, 7)
         vib_lay.setSpacing(10)
 
-        vib_text = QVBoxLayout()
-        vib_text.setSpacing(2)
-        self.lbl_full_dir_info = QLabel("目录: 未加载视频 (支持拖入多个 MP4 / MOV 文件)")
+        src_col = QVBoxLayout()
+        src_col.setSpacing(2)
+        self.lbl_full_dir_info = QLabel("源目录: 未加载视频 (支持拖入多个 MP4 / MOV 文件)")
         self.lbl_full_dir_info.setWordWrap(True)
         self.lbl_full_dir_info.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.lbl_full_dir_info.setStyleSheet(f"color: {PALETTE['ink_primary']};")
-        self.lbl_video_info = QLabel("规格: -")
+        self.lbl_video_info = QLabel("源规格: -")
         self.lbl_video_info.setStyleSheet(f"color: {PALETTE['ink_secondary']};")
-        vib_text.addWidget(self.lbl_full_dir_info)
-        vib_text.addWidget(self.lbl_video_info)
-        vib_lay.addLayout(vib_text, 1)
+        src_col.addWidget(self.lbl_full_dir_info)
+        src_col.addWidget(self.lbl_video_info)
+        vib_lay.addLayout(src_col, 5)
 
-        self.btn_locate_source = QPushButton("📁 定位文件")
-        self.btn_locate_source.setEnabled(False)
-        self.btn_locate_source.clicked.connect(self._locate_current_video_dir)
+        vib_lay.addWidget(_v_divider())
+
+        out_col = QVBoxLayout()
+        out_col.setSpacing(2)
+        self.lbl_out_file_info = ElidedLabel("输出文件: -", Qt.TextElideMode.ElideMiddle)
+        self.lbl_out_file_info.setStyleSheet(f"color: {PALETTE['indigo_pressed']};")
+        self.lbl_out_spec_info = ElidedLabel("输出规格: -", Qt.TextElideMode.ElideRight)
+        self.lbl_out_spec_info.setStyleSheet(f"color: {PALETTE['ink_secondary']};")
+        out_col.addWidget(self.lbl_out_file_info)
+        out_col.addWidget(self.lbl_out_spec_info)
+        vib_lay.addLayout(out_col, 4)
+
         self.btn_open = QPushButton("📂 导入视频 (支持多选)...")
         self.btn_open.setObjectName("cropToggleBtn")
         self.btn_open.clicked.connect(self._on_open_videos)
-        vib_lay.addWidget(self.btn_locate_source)
         vib_lay.addWidget(self.btn_open)
         left_layout.addWidget(self.video_info_bar)
 
@@ -490,7 +510,6 @@ class MainWindow(QMainWindow):
         self.seg_ui_mode.selectionChanged.connect(lambda m: self.set_ui_mode(str(m)))
         studio_lay.addWidget(self.seg_ui_mode)
 
-        # Single ScrollArea hosting Simple / Advanced + Shared Bitrate & Output Dir
         self.studio_scroll = QScrollArea()
         self.studio_scroll.setWidgetResizable(True)
         self.studio_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -557,24 +576,40 @@ class MainWindow(QMainWindow):
         adv_lay.setContentsMargins(0, 0, 0, 0)
         adv_lay.setSpacing(8)
 
-        # --- Section A: Crop, Orientation, Colon-free Ratio, Alignment, Polaroid ---
-        adv_lay.addWidget(_section_header("画面裁切、对齐与拍立得"))
+        # --- Section A: Streamlined 3-Way Framing (原画幅 / 比例裁切 / 拍立得相纸) ---
+        adv_lay.addWidget(_section_header("画面构图与拍立得"))
 
-        row_crop_top = QHBoxLayout()
-        row_crop_top.setSpacing(6)
-        self.btn_crop_toggle = QPushButton("✂ 裁切构图")
+        self.seg_framing_mode = SegmentedBar(
+            [("原画幅 (不裁切)", "none"), ("✂ 比例裁切", "crop"), ("🎞 拍立得相纸", "polaroid")]
+        )
+        self.seg_framing_mode.selectionChanged.connect(lambda m: self._on_framing_mode_changed(str(m)))
+        adv_lay.addWidget(self.seg_framing_mode)
+
+        # Compatibility crop toggle button (synced with seg_framing_mode / preview.is_crop_editing)
+        self.btn_crop_toggle = QPushButton("👁 隐藏框线预览")
         self.btn_crop_toggle.setObjectName("cropToggleBtn")
         self.btn_crop_toggle.setCheckable(True)
         self.btn_crop_toggle.setChecked(False)
         self.btn_crop_toggle.toggled.connect(self._on_crop_toggle_changed)
-        self.btn_pad_margin = QPushButton("+10% 画布")
-        self.btn_pad_margin.clicked.connect(self._expand_crop_margin)
-        self.btn_reset_crop = QPushButton("↺ 重置构图")
-        self.btn_reset_crop.clicked.connect(self._reset_crop)
-        row_crop_top.addWidget(self.btn_crop_toggle, 1)
-        row_crop_top.addWidget(self.btn_pad_margin, 1)
-        row_crop_top.addWidget(self.btn_reset_crop, 1)
-        adv_lay.addLayout(row_crop_top)
+
+        # Streamlined Crop Sub-Panel (visible when seg_framing_mode == "crop")
+        self.crop_subpanel = QWidget()
+        cs_lay = QVBoxLayout(self.crop_subpanel)
+        cs_lay.setContentsMargins(0, 2, 0, 0)
+        cs_lay.setSpacing(6)
+
+        row_ratio_ori = QHBoxLayout()
+        row_ratio_ori.setSpacing(5)
+        self.aspect_btn_group = QButtonGroup(self)
+        for label, key, _r in CANONICAL_RATIOS:
+            ab = ChipButton(label)
+            ab.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            self.aspect_btn_group.addButton(ab)
+            ab.clicked.connect(lambda _=False, k=key: self._on_aspect_button_clicked(k))
+            row_ratio_ori.addWidget(ab, 1)
+            self._aspect_buttons[key] = ab
+        self._aspect_buttons["orig"].setChecked(True)
+        cs_lay.addLayout(row_ratio_ori)
 
         row_ori_fit = QHBoxLayout()
         row_ori_fit.setSpacing(6)
@@ -582,37 +617,22 @@ class MainWindow(QMainWindow):
         self.seg_orientation.selectionChanged.connect(lambda o: self._on_orientation_changed(str(o)))
         self.seg_fit_mode = SegmentedBar([("内裁填满", "inside"), ("外扩留边", "pad")])
         self.seg_fit_mode.selectionChanged.connect(lambda m: self._reapply_current_aspect(str(m)))
+        self.btn_pad_margin = QPushButton("+10% 留边")
+        self.btn_pad_margin.clicked.connect(self._expand_crop_margin)
         row_ori_fit.addWidget(self.seg_orientation, 1)
         row_ori_fit.addWidget(self.seg_fit_mode, 1)
-        adv_lay.addLayout(row_ori_fit)
+        row_ori_fit.addWidget(self.btn_pad_margin)
+        cs_lay.addLayout(row_ori_fit)
 
-        ratio_row = QHBoxLayout()
-        ratio_row.setSpacing(8)
-        ratio_row.addWidget(_field_lbl("画面比例"))
-        ratio_grid = QGridLayout()
-        ratio_grid.setSpacing(5)
-        self.aspect_btn_group = QButtonGroup(self)
-        for idx, (label, key, _r) in enumerate(CANONICAL_RATIOS):
-            ab = ChipButton(label)
-            ab.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-            self.aspect_btn_group.addButton(ab)
-            ab.clicked.connect(lambda _=False, k=key: self._on_aspect_button_clicked(k))
-            ratio_grid.addWidget(ab, idx // 4, idx % 4)
-            self._aspect_buttons[key] = ab
-        self._aspect_buttons["orig"].setChecked(True)
-        ratio_row.addLayout(ratio_grid, 1)
-        adv_lay.addLayout(ratio_row)
-
-        # Colon-free manual ratio input (W : H)
         row_manual = QHBoxLayout()
         row_manual.setSpacing(5)
-        row_manual.addWidget(_field_lbl("手动比例"))
+        row_manual.addWidget(_field_lbl("自定义比"))
         self.edit_ratio_w = QLineEdit()
-        self.edit_ratio_w.setPlaceholderText("宽 (如16)")
+        self.edit_ratio_w.setPlaceholderText("宽")
         self.edit_ratio_w.setValidator(QDoubleValidator(0.01, 9999.0, 2))
         self.edit_ratio_w.returnPressed.connect(self._apply_manual_ratio)
         self.edit_ratio_h = QLineEdit()
-        self.edit_ratio_h.setPlaceholderText("高 (如9)")
+        self.edit_ratio_h.setPlaceholderText("高")
         self.edit_ratio_h.setValidator(QDoubleValidator(0.01, 9999.0, 2))
         self.edit_ratio_h.returnPressed.connect(self._apply_manual_ratio)
         lbl_colon = QLabel(":")
@@ -624,38 +644,31 @@ class MainWindow(QMainWindow):
         row_manual.addWidget(lbl_colon)
         row_manual.addWidget(self.edit_ratio_h, 1)
         row_manual.addWidget(self.btn_apply_ratio)
-        adv_lay.addLayout(row_manual)
+        row_manual.addWidget(self.btn_crop_toggle)
+        cs_lay.addLayout(row_manual)
 
-        # Alignment buttons
         row_align = QHBoxLayout()
         row_align.setSpacing(4)
-        row_align.addWidget(_field_lbl("对齐位置"))
-        align_grid = QGridLayout()
-        align_grid.setSpacing(4)
-        align_defs = [
+        self.align_buttons: dict[str, QPushButton] = {}
+        for lbl, mode in (
             ("✛ 居中", "center"),
-            ("⇹ 水平中", "center_h"),
-            ("⇳ 垂直中", "center_v"),
-            ("⇤ 靠左", "left"),
-            ("⇥ 靠右", "right"),
             ("⇡ 靠上", "top"),
             ("⇣ 靠下", "bottom"),
-        ]
-        self.align_buttons: dict[str, QPushButton] = {}
-        for idx, (lbl, mode) in enumerate(align_defs):
+            ("⇤ 靠左", "left"),
+            ("⇥ 靠右", "right"),
+        ):
             btn = QPushButton(lbl)
             btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             btn.clicked.connect(lambda _=False, m=mode: self._on_align_clicked(m))
-            align_grid.addWidget(btn, idx // 4, idx % 4)
+            row_align.addWidget(btn, 1)
             self.align_buttons[mode] = btn
-        row_align.addLayout(align_grid, 1)
-        adv_lay.addLayout(row_align)
+        cs_lay.addLayout(row_align)
+        adv_lay.addWidget(self.crop_subpanel)
 
-        # Polaroid presets
-        pol_row = QHBoxLayout()
-        pol_row.setSpacing(8)
-        pol_row.addWidget(_field_lbl("拍立得"))
-        pol_grid = QGridLayout()
+        # Polaroid Sub-Panel (visible when seg_framing_mode == "polaroid")
+        self.polaroid_subpanel = QWidget()
+        pol_grid = QGridLayout(self.polaroid_subpanel)
+        pol_grid.setContentsMargins(0, 2, 0, 0)
         pol_grid.setSpacing(5)
         for idx, (pkey, spec) in enumerate(POLAROID_PRESETS.items()):
             pb = ChipButton(spec.label)
@@ -664,10 +677,13 @@ class MainWindow(QMainWindow):
             pb.clicked.connect(lambda _=False, k=pkey: self._apply_polaroid_preset(k))
             pol_grid.addWidget(pb, idx // 2, idx % 2)
             self._polaroid_buttons[pkey] = pb
-        pol_row.addLayout(pol_grid, 1)
-        adv_lay.addLayout(pol_row)
+        adv_lay.addWidget(self.polaroid_subpanel)
 
-        # Flat out-of-bounds background
+        # Contextual Background Style Panel (only shown for Polaroid or out-of-bounds pad)
+        self.bg_style_panel = QWidget()
+        bg_lay = QVBoxLayout(self.bg_style_panel)
+        bg_lay.setContentsMargins(0, 2, 0, 0)
+        bg_lay.setSpacing(5)
         row_bg = QHBoxLayout()
         row_bg.setSpacing(5)
         row_bg.addWidget(_field_lbl("外扩背景"))
@@ -685,7 +701,7 @@ class MainWindow(QMainWindow):
         self.btn_bg_white.clicked.connect(lambda: self._set_bg_color("#FFFFFF", self.btn_bg_white))
         self.btn_bg_black.clicked.connect(lambda: self._set_bg_color("#000000", self.btn_bg_black))
         self.btn_bg_pick.clicked.connect(self._pick_bg_color)
-        adv_lay.addLayout(row_bg)
+        bg_lay.addLayout(row_bg)
 
         self.blur_row_widget = QWidget()
         br_lay = QHBoxLayout(self.blur_row_widget)
@@ -700,11 +716,12 @@ class MainWindow(QMainWindow):
         self.lbl_blur_val = QLabel("35")
         self.lbl_blur_val.setFixedWidth(28)
         br_lay.addWidget(self.lbl_blur_val)
-        adv_lay.addWidget(self.blur_row_widget)
+        bg_lay.addWidget(self.blur_row_widget)
+        adv_lay.addWidget(self.bg_style_panel)
 
         adv_lay.addWidget(_divider())
 
-        # --- Section B: Audio & FPS / RIFE (Zero Dropdowns!) ---
+        # --- Section B: Audio & FPS / RIFE (Zero Dropdowns) ---
         adv_lay.addWidget(_section_header("声音与帧率补帧 (GPU 光流)"))
 
         row_audio = QHBoxLayout()
@@ -843,7 +860,7 @@ class MainWindow(QMainWindow):
 
         adv_lay.addWidget(_divider())
 
-        # --- Section C: Key Photo ---
+        # --- Section C: Key Photo (Hide external row when video frame selected) ---
         adv_lay.addWidget(_section_header("实况封面 (主要图片)"))
         self.seg_key_source = SegmentedBar(
             [("使用视频选定帧", "video_frame"), ("使用外部自定义图片", "external_image")]
@@ -856,7 +873,9 @@ class MainWindow(QMainWindow):
         key_left = QVBoxLayout()
         key_left.setSpacing(6)
 
-        row_kf = QHBoxLayout()
+        self.video_key_row_widget = QWidget()
+        row_kf = QHBoxLayout(self.video_key_row_widget)
+        row_kf.setContentsMargins(0, 0, 0, 0)
         row_kf.setSpacing(5)
         row_kf.addWidget(_field_lbl("封面帧号"))
         self.spin_key_frame = NoWheelSpinBox()
@@ -870,7 +889,12 @@ class MainWindow(QMainWindow):
         self.btn_jump_key.clicked.connect(lambda: self._seek_frame(self.spin_key_frame.value()))
         row_kf.addWidget(self.btn_jump_key)
         row_kf.addStretch(1)
-        key_left.addLayout(row_kf)
+        key_left.addWidget(self.video_key_row_widget)
+
+        self.ext_key_container = QWidget()
+        ext_lay = QVBoxLayout(self.ext_key_container)
+        ext_lay.setContentsMargins(0, 0, 0, 0)
+        ext_lay.setSpacing(6)
 
         row_ext = QHBoxLayout()
         row_ext.setSpacing(5)
@@ -881,7 +905,7 @@ class MainWindow(QMainWindow):
         self.lbl_ext_name = ElidedLabel("未选择外部图片", Qt.TextElideMode.ElideMiddle)
         self.lbl_ext_name.setStyleSheet(f"color: {PALETTE['ink_muted']};")
         row_ext.addWidget(self.lbl_ext_name, 1)
-        key_left.addLayout(row_ext)
+        ext_lay.addLayout(row_ext)
 
         self.ext_aspect_panel = QWidget()
         ea_lay = QHBoxLayout(self.ext_aspect_panel)
@@ -902,7 +926,8 @@ class MainWindow(QMainWindow):
             self.ext_aspect_group.addButton(b)
             b.clicked.connect(lambda _=False, m=mode_val: self._on_ext_aspect_mode_clicked(m))
             ea_lay.addWidget(b, 1)
-        key_left.addWidget(self.ext_aspect_panel)
+        ext_lay.addWidget(self.ext_aspect_panel)
+        key_left.addWidget(self.ext_key_container)
 
         self.lbl_key_thumb = QLabel("封面")
         self.lbl_key_thumb.setFixedSize(88, 108)
@@ -916,8 +941,8 @@ class MainWindow(QMainWindow):
 
         adv_lay.addWidget(_divider())
 
-        # --- Section D: Export Format (Buttons), Long Edge, EXIF (with Folder Match) ---
-        adv_lay.addWidget(_section_header("画质规格与相机 EXIF"))
+        # --- Section D: Export Format, Long Edge (+ Live Scaled Spec), Bitrate, Blank EXIF ---
+        adv_lay.addWidget(_section_header("画质规格、码率与相机 EXIF"))
 
         row_fmt = QHBoxLayout()
         row_fmt.setSpacing(8)
@@ -952,18 +977,36 @@ class MainWindow(QMainWindow):
         self.spin_custom_edge.setSingleStep(2)
         self.spin_custom_edge.setSpecialValueText("原尺寸")
         self.spin_custom_edge.setSuffix(" px")
-        self.spin_custom_edge.setFixedWidth(112)
+        self.spin_custom_edge.setFixedWidth(108)
         self.spin_custom_edge.valueChanged.connect(self._on_custom_edge_changed)
         row_edge2.addWidget(self.spin_custom_edge)
-        lbl_edge_hint = QLabel("(0 = 保持源尺寸不缩放)")
-        lbl_edge_hint.setStyleSheet(f"color: {PALETTE['ink_muted']};")
-        row_edge2.addWidget(lbl_edge_hint, 1)
+        self.lbl_scaled_res_spec = ElidedLabel("当前规格: -", Qt.TextElideMode.ElideRight)
+        self.lbl_scaled_res_spec.setObjectName("metaCapsule")
+        row_edge2.addWidget(self.lbl_scaled_res_spec, 1)
         adv_lay.addLayout(row_edge2)
+
+        row_br = QHBoxLayout()
+        row_br.setSpacing(6)
+        row_br.addWidget(_field_lbl("输出码率"))
+        self.slider_bitrate = NoWheelSlider(Qt.Orientation.Horizontal)
+        self.slider_bitrate.setRange(4, 80)
+        self.slider_bitrate.setValue(24)
+        self.slider_bitrate.valueChanged.connect(self._on_bitrate_changed)
+        row_br.addWidget(self.slider_bitrate, 1)
+        self.lbl_bitrate_val = QLabel("24 Mbps")
+        self.lbl_bitrate_val.setFixedWidth(64)
+        self.lbl_bitrate_val.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        row_br.addWidget(self.lbl_bitrate_val)
+        adv_lay.addLayout(row_br)
+
+        self.lbl_est_size = ElidedLabel("预计输出体积: -", Qt.TextElideMode.ElideRight)
+        self.lbl_est_size.setObjectName("metaCapsule")
+        adv_lay.addWidget(self.lbl_est_size)
 
         row_exif = QHBoxLayout()
         row_exif.setSpacing(6)
         row_exif.addWidget(_field_lbl("相机 EXIF"))
-        self.lbl_exif_summary = ElidedLabel("默认 Apple 实况信息", Qt.TextElideMode.ElideRight)
+        self.lbl_exif_summary = ElidedLabel("空白 (不写入相机参数)", Qt.TextElideMode.ElideRight)
         self.lbl_exif_summary.setObjectName("metaCapsule")
         row_exif.addWidget(self.lbl_exif_summary, 1)
         adv_lay.addLayout(row_exif)
@@ -981,34 +1024,16 @@ class MainWindow(QMainWindow):
         adv_lay.addWidget(_divider())
         body_lay.addWidget(self.advanced_container)
 
-        # ======== SHARED SECTION: BITRATE & OUTPUT DIRECTORY ========
+        # ======== SHARED SECTION: OUTPUT DIRECTORY & NAMING ========
         self.shared_export_container = QWidget()
         sh_lay = QVBoxLayout(self.shared_export_container)
         sh_lay.setContentsMargins(0, 0, 0, 0)
         sh_lay.setSpacing(7)
 
-        sh_lay.addWidget(_section_header("输出码率与目录"))
-
-        row_br = QHBoxLayout()
-        row_br.setSpacing(6)
-        row_br.addWidget(_field_lbl("输出码率"))
-        self.slider_bitrate = NoWheelSlider(Qt.Orientation.Horizontal)
-        self.slider_bitrate.setRange(4, 80)
-        self.slider_bitrate.setValue(24)
-        self.slider_bitrate.valueChanged.connect(self._on_bitrate_changed)
-        row_br.addWidget(self.slider_bitrate, 1)
-        self.lbl_bitrate_val = QLabel("24 Mbps")
-        self.lbl_bitrate_val.setFixedWidth(64)
-        self.lbl_bitrate_val.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        row_br.addWidget(self.lbl_bitrate_val)
-        sh_lay.addLayout(row_br)
-
-        self.lbl_est_size = ElidedLabel("预计输出体积: -", Qt.TextElideMode.ElideRight)
-        self.lbl_est_size.setObjectName("metaCapsule")
-        sh_lay.addWidget(self.lbl_est_size)
+        sh_lay.addWidget(_section_header("输出目录与命名"))
 
         self.seg_export_mode = SegmentedBar(
-            [("U盘相机 (DCIM)", "usb_dcim"), ("普通文件夹", "folder")]
+            [("普通文件夹", "folder"), ("U盘相机 (DCIM)", "usb_dcim")]
         )
         self.seg_export_mode.selectionChanged.connect(lambda _k: self._on_export_mode_changed())
         sh_lay.addWidget(self.seg_export_mode)
@@ -1065,16 +1090,59 @@ class MainWindow(QMainWindow):
         sh_lay.addWidget(self.usb_panel)
 
         self.folder_panel = QWidget()
-        fol_lay = QHBoxLayout(self.folder_panel)
-        fol_lay.setContentsMargins(0, 2, 0, 0)
+        fol_vbox = QVBoxLayout(self.folder_panel)
+        fol_vbox.setContentsMargins(0, 2, 0, 0)
+        fol_vbox.setSpacing(6)
+
+        fol_lay = QHBoxLayout()
         fol_lay.setSpacing(6)
         self.edit_folder = QLineEdit(str(Path.home() / "Desktop" / "LivePhoto_Output"))
+        self.edit_folder.textChanged.connect(self._update_export_preview)
         self.btn_browse_folder = QPushButton("浏览...")
         self.btn_browse_folder.clicked.connect(self._browse_output_folder)
         self.chk_livp = StyledCheckBox(".livp")
         fol_lay.addWidget(self.edit_folder, 1)
         fol_lay.addWidget(self.btn_browse_folder)
         fol_lay.addWidget(self.chk_livp)
+        fol_vbox.addLayout(fol_lay)
+
+        self.folder_naming_widget = QWidget()
+        fn_lay = QVBoxLayout(self.folder_naming_widget)
+        fn_lay.setContentsMargins(0, 0, 0, 0)
+        fn_lay.setSpacing(5)
+        self.seg_folder_naming = SegmentedBar(
+            [("源名+后缀", "suffix"), ("原文件名", "original"), ("前缀+序号", "prefix_seq"), ("自定义", "custom")]
+        )
+        self.seg_folder_naming.selectionChanged.connect(lambda _k: self._on_folder_naming_changed())
+        fn_lay.addWidget(self.seg_folder_naming)
+
+        fn_sub = QHBoxLayout()
+        fn_sub.setSpacing(5)
+        self.lbl_fn_param = _field_lbl("文件后缀")
+        self.edit_folder_suffix = QLineEdit("_2live")
+        self.edit_folder_suffix.setFixedWidth(96)
+        self.edit_folder_suffix.textChanged.connect(self._update_export_preview)
+        self.edit_folder_prefix = QLineEdit("LIVE_")
+        self.edit_folder_prefix.setFixedWidth(100)
+        self.edit_folder_prefix.textChanged.connect(self._update_export_preview)
+        self.spin_folder_seq = FourDigitSpinBox()
+        self.spin_folder_seq.setRange(1, 9999)
+        self.spin_folder_seq.setValue(1)
+        self.spin_folder_seq.setFixedWidth(74)
+        self.spin_folder_seq.valueChanged.connect(self._update_export_preview)
+        self.chk_avoid_overwrite = StyledCheckBox("防重名自动编号")
+        self.chk_avoid_overwrite.setChecked(True)
+        fn_sub.addWidget(self.lbl_fn_param)
+        fn_sub.addWidget(self.edit_folder_suffix)
+        fn_sub.addWidget(self.edit_folder_prefix)
+        fn_sub.addWidget(self.spin_folder_seq)
+        fn_sub.addWidget(self.chk_avoid_overwrite, 1)
+        fn_lay.addLayout(fn_sub)
+
+        self.lbl_folder_dest_preview = ElidedLabel("", Qt.TextElideMode.ElideMiddle)
+        self.lbl_folder_dest_preview.setStyleSheet(f"color: {PALETTE['ink_secondary']};")
+        fn_lay.addWidget(self.lbl_folder_dest_preview)
+        fol_vbox.addWidget(self.folder_naming_widget)
         sh_lay.addWidget(self.folder_panel)
 
         self.chk_hw_encode = StyledCheckBox(
@@ -1127,9 +1195,11 @@ class MainWindow(QMainWindow):
         self.main_splitter.setStretchFactor(1, 0)
         self.main_splitter.setSizes([950, 560])
 
+        self._on_framing_mode_changed("none")
         self._on_bg_changed()
         self._on_fps_mode_changed()
         self._on_key_source_changed()
+        self._on_folder_naming_changed()
         self._on_export_mode_changed()
         self._on_custom_fps_changed(self.spin_custom_fps.value())
         self._rebuild_queue_bar()
@@ -1143,11 +1213,14 @@ class MainWindow(QMainWindow):
         self.simple_container.setVisible(not is_adv)
         self.advanced_container.setVisible(is_adv)
         self.dcf_row_widget.setVisible(is_adv)
+        self.folder_naming_widget.setVisible(is_adv)
         self.chk_livp.setVisible(is_adv)
         self.chk_hw_encode.setVisible(is_adv)
 
         if not is_adv:
             self._sync_simple_controls_from_state()
+        self._update_summary()
+        self._update_export_preview()
 
     def _sync_simple_controls_from_state(self) -> None:
         self._syncing_ui = True
@@ -1269,6 +1342,7 @@ class MainWindow(QMainWindow):
             end_frame=max(0, info.nb_frames - 1),
             crop=CropRect(0, 0, info.width, info.height),
             padding=FramePadding(),
+            framing_mode="none",
             polaroid_preset=None,
             aspect_key="orig",
             orientation="portrait" if info.height >= info.width else "landscape",
@@ -1301,6 +1375,7 @@ class MainWindow(QMainWindow):
         st.end_frame = self.spin_end.value()
         st.crop = self.preview.get_crop()
         st.padding = self.preview.get_padding()
+        st.framing_mode = self._framing_mode
         st.polaroid_preset = self._active_polaroid
         st.aspect_key = self._active_aspect_key
         st.orientation = self._orientation
@@ -1344,13 +1419,12 @@ class MainWindow(QMainWindow):
 
         self._syncing_ui = True
         try:
-            self.lbl_full_dir_info.setText(f"目录: {info.path.parent}   |   文件: {info.path.name}")
+            self.lbl_full_dir_info.setText(f"源目录: {info.path.parent}   |   文件: {info.path.name}")
             audio_tag = "含音轨" if info.has_audio else "无音轨"
             self.lbl_video_info.setText(
-                f"规格: {info.width}×{info.height} · {info.fps:.0f} 帧/秒 · 共 {info.nb_frames} 帧 "
+                f"源规格: {info.width}×{info.height} · {info.fps:.0f} 帧/秒 · {info.nb_frames} 帧 "
                 f"({format_frames_as_sec_frames(info.nb_frames, info.fps)}) · {audio_tag}"
             )
-            self.btn_locate_source.setEnabled(True)
 
             max_idx = max(0, info.nb_frames - 1)
             self.spin_start.setRange(0, max_idx)
@@ -1360,6 +1434,8 @@ class MainWindow(QMainWindow):
             self.spin_end.setValue(st.end_frame)
             self.spin_key_frame.setValue(st.key_frame_index)
 
+            self._framing_mode = st.framing_mode
+            self.seg_framing_mode.setCurrentKey(st.framing_mode)
             self._active_aspect_key = st.aspect_key
             self._orientation = st.orientation
             self.seg_orientation.setCurrentKey(st.orientation)
@@ -1411,14 +1487,16 @@ class MainWindow(QMainWindow):
 
             self._exif_metadata = st.exif_metadata
             self.lbl_exif_summary.setText(
-                st.exif_metadata.summary_text() if st.exif_metadata else "默认 Apple 实况信息"
+                st.exif_metadata.summary_text() if st.exif_metadata else "空白 (不写入相机参数)"
             )
 
+            crop_active = st.framing_mode == "crop"
             self.btn_crop_toggle.setChecked(False)
-            self.preview.set_crop_editing(False)
+            self.preview.set_crop_editing(crop_active)
             self.preview.reset_view()
             self.preview.set_padding(st.padding)
             self.preview.set_crop(st.crop)
+            self._sync_framing_visibility()
             self._refresh_canvas_res_label()
             self.btn_convert.setEnabled(True)
         finally:
@@ -1495,9 +1573,10 @@ class MainWindow(QMainWindow):
         self._active_idx = -1
         self._video_info = None
         self.preview.set_frame(None, 0, 0, 0)
-        self.lbl_full_dir_info.setText("目录: 未加载视频 (支持拖入多个 MP4 / MOV 文件)")
-        self.lbl_video_info.setText("规格: -")
-        self.btn_locate_source.setEnabled(False)
+        self.lbl_full_dir_info.setText("源目录: 未加载视频 (支持拖入多个 MP4 / MOV 文件)")
+        self.lbl_video_info.setText("源规格: -")
+        self.lbl_out_file_info.setText("输出文件: -")
+        self.lbl_out_spec_info.setText("输出规格: -")
         self.btn_convert.setEnabled(False)
         self._rebuild_queue_bar()
 
@@ -1525,17 +1604,12 @@ class MainWindow(QMainWindow):
             st.image_format = src.image_format
             st.exif_metadata = src.exif_metadata.clone() if src.exif_metadata else None
             if src.polaroid_preset:
+                st.framing_mode = "polaroid"
                 st.polaroid_preset = src.polaroid_preset
                 st.crop, st.padding = compute_polaroid_layout(
                     src.polaroid_preset, st.info.width, st.info.height
                 )
         self.lbl_status.setText(f"已将当前参数同步至全部 {len(self._queue)} 个视频")
-
-    def _locate_current_video_dir(self) -> None:
-        if self._video_info is None:
-            return
-        if os.name == "nt":
-            subprocess.Popen(["explorer", "/select,", str(self._video_info.path)])
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
         if event.mimeData().hasUrls():
@@ -1738,11 +1812,46 @@ class MainWindow(QMainWindow):
         self.timeline.configure(self._video_info.nb_frames, start, end, self._current_frame, kf)
         self._update_summary()
 
-    # ---------- Crop, Orientation, Colon-Free Ratio, Alignment & Polaroid ----------
+    # ---------- Streamlined 3-Way Framing, Orientation & Alignment ----------
 
-    def _on_crop_toggle_changed(self, checked: bool) -> None:
-        self.btn_crop_toggle.setText("✓ 完成裁切" if checked else "✂ 裁切构图")
-        self.preview.set_crop_editing(checked)
+    def _sync_framing_visibility(self) -> None:
+        is_crop = self._framing_mode == "crop"
+        is_pol = self._framing_mode == "polaroid"
+        self.crop_subpanel.setVisible(is_crop)
+        self.polaroid_subpanel.setVisible(is_pol)
+
+        is_oob = False
+        if self._video_info is not None:
+            is_oob = self.preview.get_crop().is_out_of_bounds(self._video_info.width, self._video_info.height)
+        self.bg_style_panel.setVisible(is_pol or is_oob)
+
+    def _on_framing_mode_changed(self, mode: str) -> None:
+        if self._syncing_ui:
+            return
+        self._framing_mode = mode if mode in ("none", "crop", "polaroid") else "none"
+        if self._framing_mode == "none":
+            self._clear_polaroid_selection()
+            self.btn_crop_toggle.setChecked(False)
+            self.preview.set_crop_editing(False)
+            if self._video_info is not None:
+                self.preview.set_crop(CropRect(0, 0, self._video_info.width, self._video_info.height), emit=True)
+        elif self._framing_mode == "crop":
+            self._clear_polaroid_selection()
+            self.btn_crop_toggle.setChecked(False)
+            self.preview.set_crop_editing(True)
+        elif self._framing_mode == "polaroid":
+            self.btn_crop_toggle.setChecked(False)
+            self.preview.set_crop_editing(False)
+            if self._active_polaroid is None:
+                self._apply_polaroid_preset("mini")
+        self._sync_framing_visibility()
+        self._refresh_canvas_res_label()
+        self._update_size_estimate()
+
+    def _on_crop_toggle_changed(self, hide_box: bool) -> None:
+        if self._framing_mode == "crop":
+            self.preview.set_crop_editing(not hide_box)
+        self.btn_crop_toggle.setText("✏ 显示裁切框" if hide_box else "👁 隐藏框线预览")
 
     def _on_zoom_changed(self, zoom: float) -> None:
         pct = int(round(zoom * 100))
@@ -1750,6 +1859,8 @@ class MainWindow(QMainWindow):
 
     def _refresh_canvas_res_label(self) -> None:
         if self._video_info is None:
+            self.lbl_crop_res.setText("画布: -")
+            self.lbl_scaled_res_spec.setText("当前规格: -")
             return
         c = self.preview.get_crop()
         pad = self.preview.get_padding()
@@ -1763,9 +1874,19 @@ class MainWindow(QMainWindow):
             tag = ""
         self.lbl_crop_res.setText(f"画布: {tw}×{th}{tag}")
 
+        edge = self.spin_custom_edge.value()
+        ow, oh = compute_scaled_video_dims(tw, th, edge)
+        if edge == 0:
+            self.lbl_scaled_res_spec.setText(f"当前规格: {ow}×{oh} px (源尺寸)")
+        elif max(tw, th) <= edge:
+            self.lbl_scaled_res_spec.setText(f"当前规格: {ow}×{oh} px (不放大)")
+        else:
+            self.lbl_scaled_res_spec.setText(f"当前规格: {ow}×{oh} px")
+
     def _on_crop_changed(self, crop: CropRect) -> None:
         if self._video_info is None:
             return
+        self._sync_framing_visibility()
         self._refresh_canvas_res_label()
         self._refresh_key_thumbnail()
         self._update_size_estimate()
@@ -1783,6 +1904,14 @@ class MainWindow(QMainWindow):
                 a, b = label.split(":")
                 self._aspect_buttons[key].setText(f"{b}:{a}" if is_land else f"{a}:{b}")
 
+    def _ensure_crop_box_visible(self) -> None:
+        if self._framing_mode != "crop":
+            self._framing_mode = "crop"
+            self.seg_framing_mode.setCurrentKey("crop")
+        self.btn_crop_toggle.setChecked(False)
+        self.preview.set_crop_editing(True)
+        self._sync_framing_visibility()
+
     def _on_orientation_changed(self, ori: str) -> None:
         if self._syncing_ui:
             return
@@ -1790,8 +1919,13 @@ class MainWindow(QMainWindow):
         self._update_ratio_button_labels()
         if self._video_info is None:
             return
+        self._ensure_crop_box_visible()
         fit_mode = str(self.seg_fit_mode.currentKey() or "inside")
-        if self._active_aspect_key in ("orig", "free"):
+        if self._active_aspect_key == "orig":
+            src_ratio = self._video_info.width / self._video_info.height
+            target_r = max(src_ratio, 1.0 / src_ratio) if self._orientation == "landscape" else min(src_ratio, 1.0 / src_ratio)
+            self.preview.apply_aspect_fit(target_r, mode=fit_mode)
+        elif self._active_aspect_key == "free":
             self.preview.swap_crop_orientation(fit_mode=fit_mode)
         else:
             self._reapply_current_aspect(fit_mode)
@@ -1806,18 +1940,18 @@ class MainWindow(QMainWindow):
         if self._video_info is None:
             return
         self._clear_polaroid_selection()
+        self._ensure_crop_box_visible()
         ratio = None
         for _lbl, k, r in CANONICAL_RATIOS:
             if k == self._active_aspect_key:
                 if r is None:
-                    ratio = self._video_info.width / self._video_info.height
+                    src_r = self._video_info.width / self._video_info.height
+                    ratio = max(src_r, 1.0 / src_r) if self._orientation == "landscape" else min(src_r, 1.0 / src_r)
                 elif r < 0:
                     ratio = None
                 else:
                     ratio = (1.0 / r) if (self._orientation == "landscape" and r < 1.0) else r
                 break
-        if not self.btn_crop_toggle.isChecked():
-            self.btn_crop_toggle.setChecked(True)
         self.preview.apply_aspect_fit(ratio, mode=fit_mode)
         self._refresh_canvas_res_label()
         self._update_size_estimate()
@@ -1839,9 +1973,8 @@ class MainWindow(QMainWindow):
             return
         ratio = w_val / h_val
         self._clear_polaroid_selection()
+        self._ensure_crop_box_visible()
         fit_mode = str(self.seg_fit_mode.currentKey() or "inside")
-        if not self.btn_crop_toggle.isChecked():
-            self.btn_crop_toggle.setChecked(True)
         self.preview.apply_aspect_fit(ratio, mode=fit_mode)
         self._refresh_canvas_res_label()
         self._update_size_estimate()
@@ -1849,13 +1982,14 @@ class MainWindow(QMainWindow):
     def _on_align_clicked(self, mode: str) -> None:
         if self._video_info is None:
             return
-        if not self.btn_crop_toggle.isChecked():
-            self.btn_crop_toggle.setChecked(True)
+        self._ensure_crop_box_visible()
         self.preview.align_crop(mode)
 
     def _apply_polaroid_preset(self, preset_key: str) -> None:
         if self._video_info is None:
             return
+        self._framing_mode = "polaroid"
+        self.seg_framing_mode.setCurrentKey("polaroid")
         self._active_polaroid = preset_key
         for k, pb in self._polaroid_buttons.items():
             pb.setChecked(k == preset_key)
@@ -1868,16 +2002,17 @@ class MainWindow(QMainWindow):
         )
         if self.btn_bg_blur.isChecked():
             self._set_bg_color("#FFFFFF", self.btn_bg_white)
+        self.preview.set_crop_editing(False)
         self.preview.set_padding(pad)
         self.preview.set_crop(crop, emit=True)
+        self._sync_framing_visibility()
         self._refresh_canvas_res_label()
         self._update_size_estimate()
 
     def _expand_crop_margin(self) -> None:
         if self._video_info is None:
             return
-        if not self.btn_crop_toggle.isChecked():
-            self.btn_crop_toggle.setChecked(True)
+        self._ensure_crop_box_visible()
         c = self.preview.get_crop()
         nw = int(round(c.w * 1.10))
         nh = int(round(c.h * 1.10))
@@ -1888,10 +2023,14 @@ class MainWindow(QMainWindow):
     def _reset_crop(self) -> None:
         if self._video_info is None:
             return
+        self._framing_mode = "none"
+        self.seg_framing_mode.setCurrentKey("none")
         self._active_aspect_key = "orig"
         self._aspect_buttons["orig"].setChecked(True)
         self._clear_polaroid_selection()
+        self.preview.set_crop_editing(False)
         self.preview.set_crop(CropRect(0, 0, self._video_info.width, self._video_info.height), emit=True)
+        self._sync_framing_visibility()
         self._refresh_canvas_res_label()
         self._update_size_estimate()
 
@@ -2020,8 +2159,7 @@ class MainWindow(QMainWindow):
                 with Image.open(self._external_key_path) as im:
                     ratio = im.width / max(1, im.height)
                 self._clear_polaroid_selection()
-                if not self.btn_crop_toggle.isChecked():
-                    self.btn_crop_toggle.setChecked(True)
+                self._ensure_crop_box_visible()
                 self.preview.apply_aspect_fit(ratio, mode="inside")
                 self._refresh_canvas_res_label()
             except Exception:
@@ -2030,11 +2168,8 @@ class MainWindow(QMainWindow):
 
     def _on_key_source_changed(self) -> None:
         is_video = self.seg_key_source.currentKey() == "video_frame"
-        self.spin_key_frame.setEnabled(is_video)
-        self.btn_take_cur_key.setEnabled(is_video)
-        self.btn_jump_key.setEnabled(is_video)
-        self.btn_choose_ext.setEnabled(not is_video)
-        self.ext_aspect_panel.setVisible(not is_video)
+        self.video_key_row_widget.setVisible(is_video)
+        self.ext_key_container.setVisible(not is_video)
         self.timeline.set_key_frame(self.spin_key_frame.value(), is_video)
         self._refresh_key_thumbnail()
         self._update_summary()
@@ -2083,7 +2218,7 @@ class MainWindow(QMainWindow):
                 return
         self.lbl_key_thumb.setText("封面")
 
-    # ---------- Long Edge, Bitrate, EXIF (Folder Match), USB ----------
+    # ---------- Long Edge, Bitrate, EXIF (Folder Match), Naming & USB ----------
 
     def _on_long_edge_preset_clicked(self, val: int) -> None:
         self._syncing_ui = True
@@ -2093,6 +2228,7 @@ class MainWindow(QMainWindow):
                 eb.setChecked(k == val)
         finally:
             self._syncing_ui = False
+        self._refresh_canvas_res_label()
         self._update_size_estimate()
 
     def _on_custom_edge_changed(self, val: int) -> None:
@@ -2100,6 +2236,7 @@ class MainWindow(QMainWindow):
             return
         for k, eb in self._long_edge_buttons.items():
             eb.setChecked(k == val)
+        self._refresh_canvas_res_label()
         self._update_size_estimate()
 
     def _on_bitrate_changed(self, val: int) -> None:
@@ -2119,7 +2256,7 @@ class MainWindow(QMainWindow):
         if dlg.exec() == ExifEditorDialog.DialogCode.Accepted:
             self._exif_metadata = dlg.get_exif_metadata()
             self.lbl_exif_summary.setText(
-                self._exif_metadata.summary_text() if self._exif_metadata else "默认 Apple 实况信息"
+                self._exif_metadata.summary_text() if self._exif_metadata else "空白 (不写入相机参数)"
             )
 
     def _on_pick_folder_auto_exif(self) -> None:
@@ -2150,6 +2287,20 @@ class MainWindow(QMainWindow):
         self._exif_metadata = None if meta.is_empty() else meta
         self.lbl_exif_summary.setText(meta.summary_text())
         self.lbl_status.setText(f"已匹配导入 EXIF: {match.name}")
+
+    def _on_folder_naming_changed(self) -> None:
+        mode = str(self.seg_folder_naming.currentKey() or "suffix")
+        self.edit_folder_suffix.setVisible(mode == "suffix")
+        self.edit_folder_prefix.setVisible(mode in ("prefix_seq", "custom"))
+        self.spin_folder_seq.setVisible(mode == "prefix_seq")
+        self.lbl_fn_param.setVisible(mode != "original")
+        if mode == "suffix":
+            self.lbl_fn_param.setText("文件后缀")
+        elif mode == "prefix_seq":
+            self.lbl_fn_param.setText("前缀序号")
+        elif mode == "custom":
+            self.lbl_fn_param.setText("自定义名")
+        self._update_export_preview()
 
     def _on_export_mode_changed(self) -> None:
         is_usb = self.seg_export_mode.currentKey() == "usb_dcim"
@@ -2216,8 +2367,21 @@ class MainWindow(QMainWindow):
             else:
                 full = str(Path(root) / "DCIM" / "100APPLE" / f"{pfx}{num:04d}.{ext}")
                 self.lbl_usb_dest_preview.setText(f"目标路径: {full}")
+        elif self._video_info is not None:
+            job = self._build_job()
+            name_pair = preview_output_filename(self._video_info, job)
+            self.lbl_folder_dest_preview.setText(f"输出预览: {Path(self.edit_folder.text().strip()) / name_pair}")
+
+        if self._video_info is not None:
+            job = self._build_job()
+            self.lbl_out_file_info.setText(f"输出名: {preview_output_filename(self._video_info, job)}")
 
     # ---------- Job Builder & Summary ----------
+
+    def _effective_bitrate_mbps(self) -> float:
+        if self._ui_mode == "simple":
+            return IPHONE_LIVE_BITRATE_MBPS
+        return float(self.slider_bitrate.value())
 
     def _build_job(self) -> ConversionJob:
         assert self._video_info is not None
@@ -2238,6 +2402,10 @@ class MainWindow(QMainWindow):
         is_usb = self.rb_export_usb.isChecked()
         usb_data = str(self.combo_usb.currentData() or "")
         out_root = Path(usb_data) if is_usb else Path(self.edit_folder.text().strip())
+
+        is_simple = self._ui_mode == "simple"
+        folder_mode = "suffix" if is_simple else str(self.seg_folder_naming.currentKey() or "suffix")
+        folder_sfx = "_2live" if is_simple else (self.edit_folder_suffix.text().strip() or "_2live")
 
         return ConversionJob(
             video_path=self._video_info.path,
@@ -2263,10 +2431,15 @@ class MainWindow(QMainWindow):
             output_root=out_root,
             dcf_prefix=normalize_dcf_prefix(self.edit_dcf_prefix.text()),
             dcf_number=self.spin_dcf.value(),
+            folder_naming_mode=folder_mode,  # type: ignore[arg-type]
+            folder_suffix=folder_sfx,
+            folder_custom_prefix=self.edit_folder_prefix.text().strip() or "LIVE_",
+            folder_seq_number=self.spin_folder_seq.value(),
+            avoid_overwrite=self.chk_avoid_overwrite.isChecked(),
             also_pack_livp=self.chk_livp.isChecked(),
             image_format=str(self.seg_img_fmt.currentKey() or "heic"),  # type: ignore[arg-type]
             video_max_edge=self.spin_custom_edge.value(),
-            video_bitrate_mbps=float(self.slider_bitrate.value()),
+            video_bitrate_mbps=self._effective_bitrate_mbps(),
             use_hw_encode=self.chk_hw_encode.isChecked(),
             bg_mode="blur" if self.btn_bg_blur.isChecked() else "solid",
             bg_blur_sigma=self.slider_blur.value(),
@@ -2281,6 +2454,12 @@ class MainWindow(QMainWindow):
         fps_mode = st.fps_mode
         if fps_mode == "rife_interpolate" and (st.rife_model == "ffmpeg_minterpolate" or find_rife() is None):
             fps_mode = "ffmpeg_minterpolate"
+
+        is_simple = self._ui_mode == "simple"
+        folder_mode = "suffix" if is_simple else str(self.seg_folder_naming.currentKey() or "suffix")
+        folder_sfx = "_2live" if is_simple else (self.edit_folder_suffix.text().strip() or "_2live")
+        bitrate = IPHONE_LIVE_BITRATE_MBPS if is_simple else st.video_bitrate_mbps
+
         return ConversionJob(
             video_path=st.info.path,
             start_frame=st.start_frame,
@@ -2305,10 +2484,15 @@ class MainWindow(QMainWindow):
             output_root=out_root,
             dcf_prefix=normalize_dcf_prefix(self.edit_dcf_prefix.text()),
             dcf_number=dcf_num,
+            folder_naming_mode=folder_mode,  # type: ignore[arg-type]
+            folder_suffix=folder_sfx,
+            folder_custom_prefix=self.edit_folder_prefix.text().strip() or "LIVE_",
+            folder_seq_number=self.spin_folder_seq.value(),
+            avoid_overwrite=self.chk_avoid_overwrite.isChecked(),
             also_pack_livp=self.chk_livp.isChecked(),
             image_format=st.image_format,  # type: ignore[arg-type]
             video_max_edge=st.video_max_edge,
-            video_bitrate_mbps=st.video_bitrate_mbps,
+            video_bitrate_mbps=bitrate,
             use_hw_encode=self.chk_hw_encode.isChecked(),
             bg_mode=st.bg_mode,  # type: ignore[arg-type]
             bg_blur_sigma=st.bg_blur_sigma,
@@ -2319,11 +2503,23 @@ class MainWindow(QMainWindow):
     def _update_size_estimate(self) -> None:
         if self._video_info is None:
             self.lbl_est_size.setText("预计输出体积: -")
+            self.lbl_out_spec_info.setText("输出规格: -")
             return
         job = self._build_job()
         summary = compute_timeline_summary(self._video_info, job)
         img_mb, mov_mb, tot_mb = estimate_output_size_mb(self._video_info, job, summary)
         self.lbl_est_size.setText(f"预计输出体积: ~{tot_mb:.1f} MB  (封面 {img_mb:.1f} MB + 视频 {mov_mb:.1f} MB)")
+
+        c = self.preview.get_crop()
+        pad = self.preview.get_padding()
+        ow, oh = compute_scaled_video_dims(c.w + pad.left + pad.right, c.h + pad.top + pad.bottom, job.video_max_edge)
+        out_dur_txt = format_frames_as_sec_frames(summary.output_frames, summary.output_fps)
+        fps_int = int(round(summary.output_fps))
+        mute_tag = "静音" if job.mute else "有声"
+        self.lbl_out_spec_info.setText(
+            f"输出规格: {ow}×{oh} · {fps_int} 帧/秒 · {summary.output_frames} 帧 ({out_dur_txt}) · {job.video_bitrate_mbps:.0f} Mbps (~{tot_mb:.1f} MB) · {mute_tag}"
+        )
+        self.lbl_out_file_info.setText(f"输出名: {preview_output_filename(self._video_info, job)}")
 
     def _update_summary(self) -> None:
         if self._video_info is None:
@@ -2357,25 +2553,32 @@ class MainWindow(QMainWindow):
         out_dur_txt = format_frames_as_sec_frames(s.output_frames, s.output_fps)
         cover_txt = format_sec_frames(s.cover_still_time, s.output_fps)
         fps_int = int(round(s.output_fps))
+        _, _, tot_mb = estimate_output_size_mb(self._video_info, job, s)
 
         summary_style = (
             f"background-color: {bg}; border: 1px solid {bd}; border-radius: 8px; padding: 7px 10px; color: {fg};"
         )
-        summary_text = (
+        adv_text = (
             f"截取: {s.selected_frames} 帧 ({in_dur_txt})  ➔  输出: {s.output_frames} 帧 @ {fps_int} 帧/秒\n"
             f"实况时长: {out_dur_txt}  |  封面锚点: {cover_txt}{note}"
         )
+        sim_text = (
+            f"输出: {s.output_frames} 帧 @ {fps_int} 帧/秒 ({out_dur_txt})  |  锚点: {cover_txt}\n"
+            f"固定码率: {int(IPHONE_LIVE_BITRATE_MBPS)} Mbps (iPhone 实况参考)  ·  预计 ~{tot_mb:.1f} MB{note}"
+        )
         self.lbl_summary.setStyleSheet(summary_style)
-        self.lbl_summary.setText(summary_text)
+        self.lbl_summary.setText(adv_text)
         self.lbl_simple_summary.setStyleSheet(summary_style)
-        self.lbl_simple_summary.setText(summary_text)
+        self.lbl_simple_summary.setText(sim_text)
 
     # ---------- Context Menu & Shortcuts ----------
 
     def _on_preview_context_menu(self, global_pos: QPoint) -> None:
         menu = QMenu(self)
         act_crop = menu.addAction("✓ 完成并隐藏裁切框" if self.preview.is_crop_editing() else "✂ 开启裁切框")
-        act_crop.triggered.connect(lambda: self.btn_crop_toggle.setChecked(not self.btn_crop_toggle.isChecked()))
+        act_crop.triggered.connect(
+            lambda: self._on_framing_mode_changed("none" if self.preview.is_crop_editing() else "crop")
+        )
 
         zoom_menu = menu.addMenu("🔍 视图缩放")
         zoom_menu.addAction("适应窗口 (100% 居中重置)").triggered.connect(self.preview.reset_view)
@@ -2396,7 +2599,7 @@ class MainWindow(QMainWindow):
         )
 
         align_menu = menu.addMenu("✛ 裁切对齐")
-        for lbl, m in (("居中", "center"), ("水平居中", "center_h"), ("垂直居中", "center_v"), ("靠左", "left"), ("靠右", "right"), ("靠上", "top"), ("靠下", "bottom")):
+        for lbl, m in (("居中", "center"), ("靠左", "left"), ("靠右", "right"), ("靠上", "top"), ("靠下", "bottom")):
             align_menu.addAction(lbl).triggered.connect(lambda _=False, mode=m: self._on_align_clicked(mode))
 
         pol_menu = menu.addMenu("🎞 拍立得相纸")
